@@ -1,0 +1,37 @@
+/* CatalystOps extension styles for webviews */
+
+:root {
+    --catalystops-critical: #dc3545;
+    --catalystops-warning: #ffc107;
+    --catalystops-info: #17a2b8;
+    --catalystops-suggestion: #6c757d;
+}
+
+.catalystops-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.75em;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.catalystops-badge.critical {
+    background: var(--catalystops-critical);
+    color: white;
+}
+
+.catalystops-badge.warning {
+    background: var(--catalystops-warning);
+    color: #212529;
+}
+
+.catalystops-badge.info {
+    background: var(--catalystops-info);
+    color: white;
+}
+
+.catalystops-badge.suggestion {
+    background: var(--catalystops-suggestion);
+    color: white;
+}

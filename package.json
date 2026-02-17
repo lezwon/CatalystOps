@@ -1,0 +1,134 @@
+{
+  "name": "catalystops",
+  "displayName": "CatalystOps - PySpark Optimizer",
+  "description": "Analyze PySpark code for performance issues using Catalyst execution plan analysis",
+  "version": "0.1.0",
+  "publisher": "catalystops",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "pyspark",
+    "spark",
+    "databricks",
+    "optimization",
+    "catalyst"
+  ],
+  "activationEvents": [
+    "onLanguage:python"
+  ],
+  "main": "./out/vscode/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "catalystops.analyzeCost",
+        "title": "CatalystOps: Analyze Cost (Dry Run)"
+      },
+      {
+        "command": "catalystops.analyzeSelection",
+        "title": "CatalystOps: Analyze Selected Code"
+      },
+      {
+        "command": "catalystops.showReport",
+        "title": "CatalystOps: Show Report"
+      },
+      {
+        "command": "catalystops.configureConnection",
+        "title": "CatalystOps: Configure Databricks Connection"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "catalystops.analyzeCost",
+        "key": "ctrl+shift+k",
+        "mac": "cmd+shift+k",
+        "when": "editorTextFocus && editorLangId == python"
+      }
+    ],
+    "configuration": {
+      "title": "CatalystOps",
+      "properties": {
+        "catalystops.databricks.host": {
+          "type": "string",
+          "default": "",
+          "description": "Databricks workspace URL (e.g., https://myworkspace.cloud.databricks.com)"
+        },
+        "catalystops.databricks.token": {
+          "type": "string",
+          "default": "",
+          "description": "Databricks personal access token"
+        },
+        "catalystops.databricks.clusterId": {
+          "type": "string",
+          "default": "",
+          "description": "Interactive cluster ID for dry run analysis"
+        },
+        "catalystops.databricks.configPath": {
+          "type": "string",
+          "default": "~/.databricks/config",
+          "description": "Path to .databricks/config file"
+        },
+        "catalystops.databricks.profile": {
+          "type": "string",
+          "default": "DEFAULT",
+          "description": "Databricks config profile name"
+        },
+        "catalystops.analysis.autoAnalyzeOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically analyze PySpark files on save"
+        },
+        "catalystops.analysis.enableLocalCodeAnalysis": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable local anti-pattern detection (no cluster needed)"
+        },
+        "catalystops.cluster.installSparkOptimizer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically install spark_optimizer library on cluster"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        { 
+          "id": "catalystops",
+          "title": "CatalystOps",
+          "icon": "media/icon.png"
+        }
+      ]
+    },
+    "views": {
+      "catalystops": [
+        {
+          "id": "catalystops.issuesTree",
+          "name": "Issues",
+          "icon": "media/icon.png"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "build": "node esbuild.js --production",
+    "lint": "tsc --noEmit",
+    "test": "node ./out/test/suite/index.js"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^2.3.8",
+    "esbuild": "^0.19.11",
+    "mocha": "^10.2.0",
+    "typescript": "^5.3.3"
+  }
+}

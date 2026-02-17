@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <rect width="128" height="128" rx="16" fill="#2c3e50"/>
+  <text x="64" y="52" font-family="Arial, sans-serif" font-size="40" font-weight="bold" fill="#e67e22" text-anchor="middle">C</text>
+  <text x="64" y="92" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#ecf0f1" text-anchor="middle">OPS</text>
+  <circle cx="98" cy="30" r="8" fill="#27ae60"/>
+  <path d="M94 30 l4 4 8-8" stroke="white" stroke-width="2" fill="none"/>
+</svg>
