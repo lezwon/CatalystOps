@@ -42,7 +42,7 @@ export const POLLING = {
     initialDelayMs: 200,
     maxDelayMs: 10000,
     backoffMultiplier: 1.5,
-    timeoutMs: 60000,
+    timeoutMs: 180000,
 } as const;
 
 /** Actions that need to be neutralized in safety wrapper */
@@ -53,6 +53,13 @@ export const DANGEROUS_ACTIONS = [
     'foreach', 'foreachBatch', 'foreachPartition',
     'start', // writeStream.start()
 ] as const;
+
+/** DBU cost estimation defaults */
+export const DBU_DEFAULTS = {
+    secondsPerCostPoint: 0.1,    // 1 cost point ≈ 0.1s cluster time
+    coresPerDBU: 4,               // rough: 1 DBU ≈ 4 cores
+    defaultDBURatePerHour: 0.40,  // Jobs Compute standard
+} as const;
 
 /** Python code patterns that indicate PySpark usage */
 export const PYSPARK_INDICATORS = [

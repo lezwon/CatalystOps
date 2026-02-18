@@ -10,6 +10,7 @@ export interface PlanIssue {
     description: string;
     costPoints: number;
     planLine?: string;
+    tableName?: string;
 }
 
 /**
@@ -18,6 +19,7 @@ export interface PlanIssue {
 export function parsePlan(planText: string): PlanIssue[] {
     const issues: PlanIssue[] = [];
     const lines = planText.split('\n');
+    let lastScannedTable: string | null = null;
 
     for (const line of lines) {
         const trimmed = line.trim();
@@ -76,15 +78,27 @@ export function parsePlan(planText: string): PlanIssue[] {
             });
         }
 
-        // Detect missing statistics
+        // Extract table names from FileScan and HiveTableScan lines
+        const fileScanMatch = trimmed.match(/FileScan\s+parquet\s+([\w.]+)/i);
+        const hiveScanMatch = trimmed.match(/HiveTableScan\s+.*?\s+([\w.]+)/i);
+        const scannedTable = fileScanMatch?.[1] || hiveScanMatch?.[1];
+        if (scannedTable) {
+            lastScannedTable = scannedTable;
+        }
+
+        // Detect missing statistics — now with table name extraction
         if (/Statistics\(sizeInBytes=.*=-1\)/i.test(trimmed) ||
-            /unknown/i.test(trimmed) && /statistic/i.test(trimmed)) {
+            (/unknown/i.test(trimmed) && /statistic/i.test(trimmed))) {
+            const tableName = lastScannedTable || undefined;
             issues.push({
                 type: 'statistics',
                 name: 'MissingStatistics',
-                description: 'Table statistics are missing. Run ANALYZE TABLE to help the optimizer make better join decisions',
+                description: tableName
+                    ? `No statistics found for table ${tableName}. Join optimization will be sub-optimal`
+                    : 'Table statistics are missing. Run ANALYZE TABLE to help the optimizer make better join decisions',
                 costPoints: 15,
                 planLine: trimmed,
+                tableName,
             });
         }
     }

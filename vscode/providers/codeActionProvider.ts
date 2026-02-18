@@ -119,7 +119,105 @@ function getQuickFixes(
             });
             break;
         }
+
+        case 'CODE_JOIN_NO_BROADCAST_001':
+        case 'JOIN_BROADCAST_001': {
+            // Wrap join argument in broadcast()
+            const joinArgMatch = lineText.match(/\.join\s*\(\s*(\w+)/);
+            if (joinArgMatch) {
+                const dfName = joinArgMatch[1];
+                const edit = new vscode.WorkspaceEdit();
+
+                // Replace .join(df_name with .join(broadcast(df_name)
+                edit.replace(
+                    document.uri,
+                    range,
+                    lineText.replace(
+                        new RegExp(`\\.join\\s*\\(\\s*${escapeRegex(dfName)}`),
+                        `.join(broadcast(${dfName})`,
+                    ),
+                );
+
+                // Add broadcast import if not already present
+                addBroadcastImport(edit, document);
+
+                fixes.push({
+                    title: `Wrap ${dfName} in broadcast()`,
+                    edit,
+                    isPreferred: true,
+                });
+            }
+            break;
+        }
+
+        case 'CODE_TABLE_NO_STATS_001':
+        case 'STATS_MISSING_001': {
+            // Insert ANALYZE TABLE statement above the flagged line
+            const tableMatch = lineText.match(/(?:spark\.table|spark\.read\.table)\s*\(\s*["']([^"']+)["']\s*\)/);
+            if (tableMatch) {
+                const tableName = tableMatch[1];
+                const edit = new vscode.WorkspaceEdit();
+                const insertPos = new vscode.Position(range.start.line, 0);
+                const indent = lineText.match(/^(\s*)/)?.[1] || '';
+                edit.insert(
+                    document.uri,
+                    insertPos,
+                    `${indent}spark.sql("ANALYZE TABLE ${tableName} COMPUTE STATISTICS")\n`,
+                );
+                fixes.push({
+                    title: `Add ANALYZE TABLE for ${tableName}`,
+                    edit,
+                    isPreferred: true,
+                });
+            }
+            break;
+        }
     }
 
     return fixes;
+}
+
+function addBroadcastImport(edit: vscode.WorkspaceEdit, document: vscode.TextDocument): void {
+    const text = document.getText();
+
+    // Check if broadcast is already imported
+    if (/\bbroadcast\b/.test(text) && /from\s+pyspark/.test(text)) {
+        return;
+    }
+
+    const lines = text.split('\n');
+
+    // Look for existing "from pyspark.sql.functions import ..." line
+    for (let i = 0; i < lines.length; i++) {
+        const match = lines[i].match(/^(\s*from\s+pyspark\.sql\.functions\s+import\s+)(.+)$/);
+        if (match) {
+            const imports = match[2];
+            if (!imports.includes('broadcast')) {
+                // Append broadcast to existing import
+                const newLine = `${match[1]}${imports.trimEnd()}, broadcast`;
+                const lineRange = new vscode.Range(i, 0, i, lines[i].length);
+                edit.replace(document.uri, lineRange, newLine);
+            }
+            return;
+        }
+    }
+
+    // No existing import found — insert after the last import line
+    let lastImportLine = -1;
+    for (let i = 0; i < lines.length; i++) {
+        if (/^\s*(import\s|from\s)/.test(lines[i])) {
+            lastImportLine = i;
+        }
+    }
+
+    const insertLine = lastImportLine >= 0 ? lastImportLine + 1 : 0;
+    edit.insert(
+        document.uri,
+        new vscode.Position(insertLine, 0),
+        'from pyspark.sql.functions import broadcast\n',
+    );
+}
+
+function escapeRegex(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

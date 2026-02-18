@@ -12,8 +12,9 @@ export interface DatabricksConnectionConfig {
 }
 
 /**
- * Get Databricks connection config from VS Code settings or .databricks/config file.
- * Priority: VS Code settings > .databricks/config file
+ * Get Databricks connection config.
+ * Merges VS Code settings with ~/.databrickscfg file.
+ * Any value from VS Code settings takes priority; missing values filled from file.
  */
 export function getConnectionConfig(): DatabricksConnectionConfig | undefined {
     const config = vscode.workspace.getConfiguration('catalystops');
@@ -22,20 +23,27 @@ export function getConnectionConfig(): DatabricksConnectionConfig | undefined {
     let token = config.get<string>('databricks.token', '');
     let clusterId = config.get<string>('databricks.clusterId', '');
 
-    // Fall back to .databricks/config file
-    if (!host || !token) {
-        const configPath = config.get<string>('databricks.configPath', '~/.databricks/config');
-        const profile = config.get<string>('databricks.profile', 'DEFAULT');
+    // Always try to fill missing values from ~/.databrickscfg
+    const configPath = config.get<string>('databricks.configPath', '~/.databrickscfg');
+    const profile = config.get<string>('databricks.profile', 'DEFAULT');
 
-        const fileConfig = readDatabricksConfig(configPath, profile);
-        if (fileConfig) {
-            if (!host) { host = fileConfig.host; }
-            if (!token) { token = fileConfig.token; }
-            if (!clusterId && fileConfig.clusterId) { clusterId = fileConfig.clusterId; }
-        }
+    const fileConfig = readDatabricksConfig(configPath, profile);
+    if (fileConfig) {
+        if (!host) { host = fileConfig.host; }
+        if (!token) { token = fileConfig.token; }
+        if (!clusterId && fileConfig.clusterId) { clusterId = fileConfig.clusterId; }
     }
 
-    if (!host || !token || !clusterId) {
+    const missing: string[] = [];
+    if (!host) { missing.push('host'); }
+    if (!token) { missing.push('token'); }
+    if (!clusterId) { missing.push('clusterId'); }
+
+    if (missing.length > 0) {
+        const src = fileConfig ? `profile "${profile}" in ${configPath}` : `${configPath} (file not found or profile "${profile}" missing)`;
+        vscode.window.showWarningMessage(
+            `CatalystOps: Missing ${missing.join(', ')}. Checked VS Code settings and ${src}. Run "CatalystOps: Configure Databricks Connection".`,
+        );
         return undefined;
     }
 
@@ -46,11 +54,6 @@ export function getConnectionConfig(): DatabricksConnectionConfig | undefined {
     }
 
     return { host, token, clusterId };
-}
-
-export function shouldInstallSparkOptimizer(): boolean {
-    return vscode.workspace.getConfiguration('catalystops')
-        .get<boolean>('cluster.installSparkOptimizer', true);
 }
 
 export function isLocalAnalysisEnabled(): boolean {

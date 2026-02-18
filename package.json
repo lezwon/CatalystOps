@@ -40,6 +40,10 @@
       {
         "command": "catalystops.configureConnection",
         "title": "CatalystOps: Configure Databricks Connection"
+      },
+      {
+        "command": "catalystops.showGeneratedScript",
+        "title": "CatalystOps: Show Generated Script"
       }
     ],
     "keybindings": [
@@ -70,8 +74,8 @@
         },
         "catalystops.databricks.configPath": {
           "type": "string",
-          "default": "~/.databricks/config",
-          "description": "Path to .databricks/config file"
+          "default": "~/.databrickscfg",
+          "description": "Path to Databricks CLI config file (~/.databrickscfg)"
         },
         "catalystops.databricks.profile": {
           "type": "string",
@@ -88,10 +92,10 @@
           "default": true,
           "description": "Enable local anti-pattern detection (no cluster needed)"
         },
-        "catalystops.cluster.installSparkOptimizer": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically install spark_optimizer library on cluster"
+        "catalystops.cost.dbuRatePerHour": {
+          "type": "number",
+          "default": 0.40,
+          "description": "DBU rate per hour for cost estimation (dollars)"
         }
       }
     },

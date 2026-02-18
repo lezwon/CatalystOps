@@ -1,80 +1,106 @@
 /**
- * Safety Wrapper - Neutralizes PySpark actions via regex replacement
- * Replaces write/action operations with .explain("formatted") to get
- * Catalyst execution plans without executing the actual job.
+ * Safety Wrapper - Neutralizes PySpark actions by commenting out dangerous lines.
+ *
+ * Instead of regex-replacing expressions (which breaks on multi-line calls and
+ * nested parentheses), this walks line-by-line:
+ *   1. Detects lines that start a dangerous action (.write, .collect, .show, etc.)
+ *   2. Comments out that line and any continuation lines (tracking paren depth)
+ *
+ * This is safe for multi-line calls like:
+ *   df.write.mode("overwrite").saveAsTable(
+ *       self._format("{prefix}table_name")
+ *   )
  */
+
+/** Patterns that indicate a line starts a dangerous PySpark action. */
+const DANGEROUS_PATTERNS = [
+    /\.write\b/,                      // .write.mode(...).save(...)
+    /\.collect\s*\(/,                 // .collect()
+    /\.count\s*\(/,                   // .count()
+    /\.show\s*\(/,                    // .show(...)
+    /\.toPandas\s*\(/,               // .toPandas()
+    /\.to_pandas_on_spark\s*\(/,     // .to_pandas_on_spark()
+    /\.toLocalIterator\s*\(/,        // .toLocalIterator()
+    /\.foreach\s*\(/,                // .foreach(...)
+    /\.foreachBatch\s*\(/,           // .foreachBatch(...)
+    /\.foreachPartition\s*\(/,       // .foreachPartition(...)
+    /(?<!\w)display\s*\(/,           // display(df)
+];
+
+/**
+ * Count parenthesis balance in a line, ignoring parens inside strings.
+ * Returns positive if more opens than closes, negative if more closes.
+ */
+function parenBalance(line: string): number {
+    let balance = 0;
+    let inSingle = false;
+    let inDouble = false;
+    let escaped = false;
+
+    for (const ch of line) {
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (ch === '\\') {
+            escaped = true;
+            continue;
+        }
+        if (ch === "'" && !inDouble) {
+            inSingle = !inSingle;
+        } else if (ch === '"' && !inSingle) {
+            inDouble = !inDouble;
+        } else if (!inSingle && !inDouble) {
+            if (ch === '(') { balance++; }
+            else if (ch === ')') { balance--; }
+        }
+    }
+    return balance;
+}
+
+/**
+ * Check if a line contains a dangerous PySpark action.
+ */
+function isDangerousLine(line: string): boolean {
+    const trimmed = line.trim();
+    // Skip already-commented lines
+    if (trimmed.startsWith('#')) { return false; }
+    return DANGEROUS_PATTERNS.some(p => p.test(trimmed));
+}
 
 /**
  * Neutralize dangerous PySpark actions in code.
- * Replaces writes, collects, shows, etc. with explain() calls.
+ * Comments out lines with write/collect/show/etc. and their multi-line continuations.
  */
 export function neutralizeCode(code: string): string {
-    let result = code;
+    const lines = code.split('\n');
+    const result: string[] = [];
+    let commenting = false;
+    let depth = 0;
 
-    // Replace .write.mode(...).saveAsTable(...) and similar write chains
-    // Match: .write followed by chained methods ending in save/saveAsTable/insertInto/parquet/csv/json/orc/text
-    result = result.replace(
-        /\.write\s*(?:\.\w+\s*\([^)]*\)\s*)*\.(?:save|saveAsTable|insertInto|parquet|csv|json|orc|text)\s*\([^)]*\)/g,
-        '._catalystops_neutralized = True; print("__PLAN__:" + df.explain(True) if hasattr(df, "explain") else "")',
-    );
+    for (const line of lines) {
+        if (!commenting) {
+            if (isDangerousLine(line)) {
+                commenting = true;
+                depth = parenBalance(line);
+                result.push(`# [CatalystOps: neutralized] ${line.trimStart()}`);
+                if (depth <= 0) {
+                    commenting = false;
+                    depth = 0;
+                }
+            } else {
+                result.push(line);
+            }
+        } else {
+            // Continue commenting out continuation lines until parens balance
+            depth += parenBalance(line);
+            result.push(`# [CatalystOps: neutralized] ${line.trimStart()}`);
+            if (depth <= 0) {
+                commenting = false;
+                depth = 0;
+            }
+        }
+    }
 
-    // Replace .write.mode(...).format(...).save(...)
-    result = result.replace(
-        /(\w+)\.write\b[^;\n]*/g,
-        (match, varName) => {
-            // Skip if already replaced
-            if (match.includes('_catalystops_neutralized')) { return match; }
-            return `print(${varName}._jdf.queryExecution().simpleString())`;
-        },
-    );
-
-    // Replace .collect()
-    result = result.replace(
-        /(\w+)\.collect\s*\(\s*\)/g,
-        '$1.explain("formatted")',
-    );
-
-    // Replace .count()
-    result = result.replace(
-        /(\w+)\.count\s*\(\s*\)/g,
-        '$1.explain("formatted")',
-    );
-
-    // Replace .show(...)
-    result = result.replace(
-        /(\w+)\.show\s*\([^)]*\)/g,
-        '$1.explain("formatted")',
-    );
-
-    // Replace .toPandas()
-    result = result.replace(
-        /(\w+)\.toPandas\s*\(\s*\)/g,
-        '$1.explain("formatted")',
-    );
-
-    // Replace display(df)
-    result = result.replace(
-        /(?<!\w)display\s*\(\s*(\w+)\s*\)/g,
-        'print($1.explain(True))',
-    );
-
-    // Replace .writeStream...start()
-    result = result.replace(
-        /\.writeStream\s*(?:\.\w+\s*\([^)]*\)\s*)*\.start\s*\([^)]*\)/g,
-        '.explain("formatted")',
-    );
-
-    // Replace .foreach / .foreachBatch / .foreachPartition
-    result = result.replace(
-        /(\w+)\.(?:foreach|foreachBatch|foreachPartition)\s*\([^)]*\)/g,
-        '$1.explain("formatted")',
-    );
-
-    // Replace .toLocalIterator()
-    result = result.replace(
-        /(\w+)\.toLocalIterator\s*\(\s*\)/g,
-        '$1.explain("formatted")',
-    );
-
-    return result;
+    return result.join('\n');
 }

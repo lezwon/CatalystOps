@@ -2,8 +2,8 @@
  * Cost Model - Heuristic cost scoring for PySpark operations
  */
 
-import { AnalysisResult, Issue, Severity } from '../models/types';
-import { COST_WEIGHTS } from '../models/constants';
+import { AnalysisResult, ClusterInfo, Issue, Severity } from '../models/types';
+import { COST_WEIGHTS, DBU_DEFAULTS } from '../models/constants';
 import { PlanIssue } from './planParser';
 
 export interface CostBreakdown {
@@ -70,6 +70,40 @@ function severityCost(severity: Severity): number {
         case Severity.INFO: return 5;
         case Severity.SUGGESTION: return 1;
     }
+}
+
+export interface DollarEstimate {
+    formatted: string;    // e.g. "$4.50" or "50pts"
+    dollars?: number;
+    costPoints: number;
+}
+
+/**
+ * Estimate dollar cost from cost points using cluster info.
+ * Falls back to "Xpts" if no cluster info available.
+ *
+ * Formula: dollars = costPoints * secondsPerCostPoint * (totalCores / coresPerDBU) * (dbuRate / 3600)
+ */
+export function estimateDollarCost(
+    costPoints: number,
+    cluster?: ClusterInfo,
+    dbuRatePerHour?: number,
+): DollarEstimate {
+    if (!cluster || !cluster.totalCores) {
+        return { formatted: `${costPoints}pts`, costPoints };
+    }
+
+    const rate = dbuRatePerHour ?? DBU_DEFAULTS.defaultDBURatePerHour;
+    const dollars = costPoints
+        * DBU_DEFAULTS.secondsPerCostPoint
+        * (cluster.totalCores / DBU_DEFAULTS.coresPerDBU)
+        * (rate / 3600);
+
+    return {
+        formatted: `$${dollars.toFixed(2)}`,
+        dollars,
+        costPoints,
+    };
 }
 
 /**

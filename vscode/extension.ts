@@ -8,7 +8,8 @@ import * as vscode from 'vscode';
 import { analyzeCode } from './analysis/codeAnalyzer';
 import { createDiagnosticCollection, setCodeIssueDiagnostics, clearDiagnostics } from './providers/diagnosticsProvider';
 import { createStatusBar, setIdle, setAnalyzing, setResults, setError } from './views/statusBar';
-import { analyzeCost } from './commands/analyzeCost';
+import { analyzeCost, showGeneratedScript } from './commands/analyzeCost';
+import { initOutputChannel } from './logger';
 import { analyzeSelection } from './commands/analyzeSelection';
 import { showReport } from './commands/showReport';
 import { configureConnection } from './commands/configureConnection';
@@ -19,6 +20,8 @@ import { IssuesTreeDataProvider } from './views/issuesTreeView';
 import { Severity } from './models/types';
 
 export function activate(context: vscode.ExtensionContext): void {
+    initOutputChannel(context);
+
     const diagnostics = createDiagnosticCollection();
     const statusBar = createStatusBar();
 
@@ -34,6 +37,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('catalystops.analyzeSelection', () => analyzeSelection(context, issuesTreeProvider)),
         vscode.commands.registerCommand('catalystops.showReport', () => showReport(context)),
         vscode.commands.registerCommand('catalystops.configureConnection', () => configureConnection()),
+        vscode.commands.registerCommand('catalystops.showGeneratedScript', () => showGeneratedScript()),
     );
 
     // Register providers for Python files

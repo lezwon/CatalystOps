@@ -420,6 +420,39 @@ df.select("*")
 df.select("id", "name", "value")`,
         },
     },
+    {
+        id: 'CODE_TABLE_NO_STATS_001',
+        name: 'Table May Lack Statistics',
+        pattern: /spark\.table\s*\(\s*["'][^"']+["']\s*\)|spark\.read\.table\s*\(\s*["'][^"']+["']\s*\)/g,
+        severity: Severity.INFO,
+        category: IssueCategory.JOIN,
+        description: 'Reading a table — verify that table statistics exist. Without statistics, the Catalyst optimizer cannot choose optimal join strategies',
+        fix: {
+            description: 'Run ANALYZE TABLE to compute statistics for better join optimization',
+            code: `# Compute table statistics:
+spark.sql("ANALYZE TABLE my_table COMPUTE STATISTICS")
+
+# Or with column-level stats:
+spark.sql("ANALYZE TABLE my_table COMPUTE STATISTICS FOR ALL COLUMNS")`,
+        },
+    },
+    {
+        id: 'CODE_JOIN_NO_BROADCAST_001',
+        name: 'Join Without broadcast()',
+        pattern: /\.join\s*\(\s*(?!broadcast\s*\()(\w+)/g,
+        severity: Severity.SUGGESTION,
+        category: IssueCategory.JOIN,
+        description: 'Join argument is not wrapped in broadcast(). If the table is small enough, wrapping it in broadcast() avoids an expensive shuffle',
+        fix: {
+            description: 'Wrap the smaller DataFrame in broadcast() to avoid shuffle',
+            code: `# Instead of:
+result = large_df.join(small_df, "key")
+
+# Use broadcast for small tables:
+from pyspark.sql.functions import broadcast
+result = large_df.join(broadcast(small_df), "key")`,
+        },
+    },
 ];
 
 /**

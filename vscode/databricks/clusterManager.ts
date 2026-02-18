@@ -52,7 +52,9 @@ async function getClusterState(host: string, token: string, clusterId: string): 
     });
 
     if (resp.statusCode !== 200) {
-        throw new Error(`Failed to get cluster state: HTTP ${resp.statusCode}`);
+        const body = resp.data as Record<string, unknown>;
+        const msg = body?.message || body?.error || JSON.stringify(body);
+        throw new Error(`Failed to get cluster state (HTTP ${resp.statusCode}): ${msg}`);
     }
 
     return {
@@ -70,6 +72,8 @@ async function startCluster(host: string, token: string, clusterId: string): Pro
     });
 
     if (resp.statusCode !== 200) {
-        throw new Error(`Failed to start cluster: HTTP ${resp.statusCode}`);
+        const body = resp.data as Record<string, unknown>;
+        const msg = body?.message || body?.error || JSON.stringify(body);
+        throw new Error(`Failed to start cluster (HTTP ${resp.statusCode}): ${msg}`);
     }
 }
