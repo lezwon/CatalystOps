@@ -38,64 +38,116 @@ function collectPyFileMap(dir: string): Map<string, string> {
     return map;
 }
 
+/** Describes a local import that will be bundled. */
+interface LocalImport {
+    /** The local module name (e.g. "provider_utils") */
+    module: string;
+    /**
+     * The prefix used in code to call into the module.
+     * Set for `import foo` → "foo" and `import foo as alias` → "alias".
+     * Undefined for `from foo import ...` (no prefix needed).
+     */
+    alias?: string;
+}
+
 /**
- * Parse import statements from Python code and return the set of local module
- * names that are actually available in the source directory.
+ * Parse import statements from Python code and return info about every local
+ * module that should be bundled.
  *
  * Handles:
- *   - from foo import bar
- *   - from foo import bar, baz
- *   - from foo import bar as b
- *   - import foo
- *   - import foo as f
+ *   - from foo import bar [as b]        → module bundled, no prefix
+ *   - import foo                         → module bundled, prefix "foo"
+ *   - import foo as alias                → module bundled, prefix "alias"
+ *   - import foo, bar                    → both bundled with their names as prefix
  */
-function parseImportedLocalModules(code: string, availableModules: Set<string>): Set<string> {
-    const imported = new Set<string>();
+function parseImportedLocalModules(code: string, availableModules: Set<string>): LocalImport[] {
+    const imports: LocalImport[] = [];
+    const seen = new Set<string>();
+
     for (const line of code.split('\n')) {
         const trimmed = line.trim();
         if (trimmed.startsWith('#')) { continue; }
 
-        // from foo import ...
+        // from foo import ...  (no prefix needed — names land in global scope)
         const fromMatch = trimmed.match(/^from\s+([\w.]+)\s+import\s/);
         if (fromMatch) {
             const mod = fromMatch[1].split('.')[0];
-            if (availableModules.has(mod)) { imported.add(mod); }
+            if (availableModules.has(mod) && !seen.has(mod)) {
+                imports.push({ module: mod });
+                seen.add(mod);
+            }
             continue;
         }
 
-        // import foo [as bar], baz [as b], ...
+        // import foo [as alias], bar [as b], ...
         const importMatch = trimmed.match(/^import\s+(.+)/);
         if (importMatch) {
             for (const part of importMatch[1].split(',')) {
-                const mod = part.trim().split(/\s+as\s+/)[0].trim().split('.')[0];
-                if (availableModules.has(mod)) { imported.add(mod); }
+                const segments = part.trim().split(/\s+as\s+/);
+                const mod = segments[0].trim().split('.')[0];
+                const alias = segments[1]?.trim() || mod;
+                if (availableModules.has(mod) && !seen.has(mod)) {
+                    imports.push({ module: mod, alias });
+                    seen.add(mod);
+                }
             }
         }
     }
-    return imported;
+    return imports;
 }
 
 /**
- * Strip import lines for bundled modules from user code, replacing them with
- * a comment so the line numbers shift minimally.
+ * Strip import lines for bundled modules and remove module-prefix references.
+ *
+ * For `import provider_utils as pu`:
+ *   - The import line is commented out.
+ *   - Every `pu.Foo(...)` occurrence becomes `Foo(...)` since the module's
+ *     functions are now inlined into global scope.
+ *
+ * For `from provider_utils import Foo`:
+ *   - The import line is commented out.
+ *   - No prefix rewriting needed — `Foo` is already a direct name.
  */
-function stripImports(code: string, bundledModules: Set<string>): string {
+function stripImportsAndRefs(code: string, localImports: LocalImport[]): string {
+    const moduleSet = new Set(localImports.map(i => i.module));
+
+    // Build alias → removal-regex pairs for `import X [as alias]` style only
+    const aliasPrefixes: RegExp[] = [];
+    for (const imp of localImports) {
+        if (imp.alias) {
+            // Match `alias.` at a word boundary so we don't clobber e.g. `mypu.foo`
+            aliasPrefixes.push(new RegExp(`\\b${escapeRegex(imp.alias)}\\.`, 'g'));
+        }
+    }
+
     return code.split('\n').map(line => {
         const trimmed = line.trim();
+
+        // Leave existing comment lines alone
         if (trimmed.startsWith('#')) { return line; }
 
+        // Comment out import lines for bundled modules
         const fromMatch = trimmed.match(/^from\s+([\w.]+)\s+import\s/);
-        if (fromMatch && bundledModules.has(fromMatch[1].split('.')[0])) {
+        if (fromMatch && moduleSet.has(fromMatch[1].split('.')[0])) {
             return `# [CatalystOps: bundled] ${trimmed}`;
         }
 
         const importMatch = trimmed.match(/^import\s+([\w.]+)/);
-        if (importMatch && bundledModules.has(importMatch[1].split('.')[0])) {
+        if (importMatch && moduleSet.has(importMatch[1].split('.')[0])) {
             return `# [CatalystOps: bundled] ${trimmed}`;
         }
 
-        return line;
+        // Remove alias. prefix from non-import lines (e.g. pu.GlobalProviders → GlobalProviders)
+        let result = line;
+        for (const pattern of aliasPrefixes) {
+            result = result.replace(pattern, '');
+        }
+        return result;
     }).join('\n');
+}
+
+function escapeRegex(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
@@ -126,13 +178,13 @@ function escapeForTripleQuote(code: string): string {
 
 /**
  * Bundle only the local .py files that are actually imported by the user code.
- * Returns inline Python code (functions in global scope) and the set of bundled module names.
+ * Returns inline Python code (functions in global scope) and import metadata.
  */
 function bundleImportedFiles(
     userCode: string,
     sourceFile: string,
     sourceDir: string,
-): { bundledCode: string; bundledModules: Set<string>; bundledFileNames: string[] } {
+): { bundledCode: string; localImports: LocalImport[]; bundledFileNames: string[] } {
     const pyFileMap = collectPyFileMap(sourceDir);
 
     // Exclude the source file itself
@@ -140,18 +192,18 @@ function bundleImportedFiles(
     pyFileMap.delete(sourceBasename);
 
     const availableModules = new Set(pyFileMap.keys());
-    const neededModules = parseImportedLocalModules(userCode, availableModules);
+    const localImports = parseImportedLocalModules(userCode, availableModules);
 
     const chunks: string[] = [];
     const bundledFileNames: string[] = [];
 
-    for (const mod of neededModules) {
-        const filePath = pyFileMap.get(mod);
+    for (const imp of localImports) {
+        const filePath = pyFileMap.get(imp.module);
         if (!filePath) { continue; }
         try {
             const content = fs.readFileSync(filePath, 'utf-8');
             const neutralized = neutralizeCode(content);
-            // Inline directly — no module wrapper, functions land in global scope
+            // Inline directly — functions land in global scope, no module wrapper
             chunks.push(`# === ${path.basename(filePath)} ===\n${neutralized}`);
             bundledFileNames.push(path.basename(filePath));
         } catch {
@@ -161,7 +213,7 @@ function bundleImportedFiles(
 
     return {
         bundledCode: chunks.join('\n\n'),
-        bundledModules: neededModules,
+        localImports,
         bundledFileNames,
     };
 }
@@ -180,7 +232,7 @@ export function generateClusterScript(
 
     if (sourceDir) {
         const sourceFile = findSourceFile(userCode, sourceDir);
-        const { bundledCode, bundledModules, bundledFileNames } = bundleImportedFiles(
+        const { bundledCode, localImports, bundledFileNames } = bundleImportedFiles(
             userCode, sourceFile, sourceDir,
         );
 
@@ -190,8 +242,8 @@ export function generateClusterScript(
             bundledDeps = bundledCode + '\n\n';
         }
 
-        // Strip import lines for bundled modules so functions are accessed directly
-        processedCode = stripImports(userCode, bundledModules);
+        // Strip import lines and rewrite alias.Foo() → Foo() for bundled modules
+        processedCode = stripImportsAndRefs(userCode, localImports);
     }
 
     const neutralizedCode = neutralizeCode(processedCode);
