@@ -3,7 +3,12 @@
   "displayName": "CatalystOps - PySpark Optimizer",
   "description": "Analyze PySpark code for performance issues using Catalyst execution plan analysis",
   "version": "0.1.0",
-  "publisher": "catalystops",
+  "publisher": "CatalystOps",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lezwon/CatalystOps"
+  },
+  "license": "MIT",
   "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.85.0"
@@ -94,14 +99,14 @@
         },
         "catalystops.cost.dbuRatePerHour": {
           "type": "number",
-          "default": 0.40,
+          "default": 0.4,
           "description": "DBU rate per hour for cost estimation (dollars)"
         }
       }
     },
     "viewsContainers": {
       "activitybar": [
-        { 
+        {
           "id": "catalystops",
           "title": "CatalystOps",
           "icon": "media/icon.png"
@@ -131,6 +136,7 @@
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
     "@vscode/test-electron": "^2.3.8",
+    "@vscode/vsce": "^3.7.1",
     "esbuild": "^0.19.11",
     "mocha": "^10.2.0",
     "typescript": "^5.3.3"

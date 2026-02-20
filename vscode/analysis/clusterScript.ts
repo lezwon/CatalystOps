@@ -303,9 +303,13 @@ def _catalystops_get_plan(df):
             return ""
 
 # Execute neutralized user code (with imported project files inlined above)
-_catalystops_user_ns = {}
+# Use a single namespace seeded with globals() so that imports made inside
+# exec (e.g. from pyspark.sql.types import StructType) are visible to
+# functions defined in the same exec block — avoids NameError on exec-scoped
+# imports when those names are referenced inside user-defined functions.
+_catalystops_user_ns = dict(globals())
 try:
-    exec('''${escapedCode}''', globals(), _catalystops_user_ns)
+    exec('''${escapedCode}''', _catalystops_user_ns)
 except Exception as _e:
     _catalystops_errors.append({
         "phase": "execution",
@@ -317,7 +321,7 @@ except Exception as _e:
 from pyspark.sql import DataFrame
 _catalystops_dfs = {}
 
-for _name, _val in {**globals(), **_catalystops_user_ns}.items():
+for _name, _val in _catalystops_user_ns.items():
     if isinstance(_val, DataFrame) and not _name.startswith('_'):
         _catalystops_dfs[_name] = _val
 

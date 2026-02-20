@@ -107,6 +107,26 @@ function extractFirstArg(s: string): string {
 }
 
 /**
+ * If `expr` ends with an unclosed f-string interpolation (e.g. `print(f"text: {df`),
+ * return only the part after the last unmatched `{`. Otherwise return `expr` unchanged.
+ *
+ * This handles cases like `print(f"Total rows: {df_spark.count()}")` where the
+ * dangerous method call is embedded inside an f-string expression.
+ */
+function stripFStringPrefix(expr: string): string {
+    let braceDepth = 0;
+    let lastOpenBrace = -1;
+    for (let i = 0; i < expr.length; i++) {
+        if (expr[i] === '{') { braceDepth++; lastOpenBrace = i; }
+        else if (expr[i] === '}') { braceDepth--; }
+    }
+    if (braceDepth > 0 && lastOpenBrace !== -1) {
+        return expr.substring(lastOpenBrace + 1).trim();
+    }
+    return expr;
+}
+
+/**
  * Try to build an `expr.explain("formatted")` replacement for a dangerous line.
  *
  * Returns the replacement string (preserving leading indentation) or undefined
@@ -132,10 +152,16 @@ function tryReplaceWithExplain(line: string): string | undefined {
         const m = re.exec(trimmed);
         if (m === null) { continue; }
 
-        const dfExpr = trimmed.substring(0, m.index).trim();
+        let dfExpr = trimmed.substring(0, m.index).trim();
         if (!dfExpr) {
             // Method starts the line — this is a continuation line (e.g. "    .write").
             // We can't build an explain from this line alone.
+            return undefined;
+        }
+        // Strip outer f-string context if the dangerous call is inside an interpolation,
+        // e.g. print(f"Total rows: {df_spark.count()}") → df_spark.explain("formatted")
+        dfExpr = stripFStringPrefix(dfExpr);
+        if (!dfExpr) {
             return undefined;
         }
         return `${indent}${dfExpr}.explain("formatted")`;
