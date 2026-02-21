@@ -236,11 +236,10 @@ export async function analyzeCost(
         updateStatusBar(allIssues);
 
         const totalIssues = allIssues.length;
-        const planCount = clusterDiagnostics.length;
-        const dfCount = analysisResults.length;
-        log(`Analysis complete: ${totalIssues} total issue(s) (${localIssues.length} local, ${planCount} from ${dfCount} DataFrame(s))`);
+        const dryRunCount = clusterDiagnostics.length + planDiagnostics.length;
+        log(`Analysis complete: ${totalIssues} total issue(s) (${localIssues.length} local, ${dryRunCount} from dry run)`);
 
-        let msg = `CatalystOps: Analysis complete. ${totalIssues} issues found (${localIssues.length} local, ${planCount} from ${dfCount} DataFrames). Estimated cost: ${runCost.formatted}.`;
+        let msg = `CatalystOps: Analysis complete. ${totalIssues} issues found (${localIssues.length} local, ${dryRunCount} from dry run). Estimated cost: ${runCost.formatted}.`;
         if (execWarning) {
             msg += ` Warning: ${execWarning}`;
         }

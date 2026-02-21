@@ -26,8 +26,16 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
     const seenInMemoryKeys = new Set<string>();
     const seenFileScanPaths = new Map<string, number>();
 
+    // AQE plans contain both "== Final Plan ==" and "== Initial Plan ==" sections.
+    // FileScan nodes appear in both, which causes false-positive RepeatedFileScan.
+    // Only analyse the Final Plan (or non-AQE plan) — skip everything after Initial Plan header.
+    let inInitialPlan = false;
+
     for (let i = 0; i < lines.length; i++) {
         const trimmed = lines[i].trim();
+
+        if (/==\s*Initial Plan\s*==/i.test(trimmed)) { inInitialPlan = true; }
+        if (inInitialPlan) { continue; }
 
         // ── Join type detection ────────────────────────────────────────────────
 
@@ -161,6 +169,26 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
                         costPoints: 35,
                         planLine: trimmed,
                     });
+                } else if (numParts === 200) {
+                    // Default partition count — check if data volume justifies more partitions.
+                    // Look wider (±15 lines) because Statistics may be on a parent/child node.
+                    const wideText = lines.slice(Math.max(0, i - 15), Math.min(i + 15, lines.length)).join('\n');
+                    const wideSize = parseSizeBytes(wideText);
+                    if (wideSize !== null && wideSize > 20 * 1024 ** 3) {
+                        const avgMB = (wideSize / numParts) / (1024 ** 2);
+                        const optimalParts = Math.ceil(wideSize / (200 * 1024 ** 2)); // target ~200 MB/partition
+                        issues.push({
+                            type: 'partition',
+                            name: 'DefaultShufflePartitions',
+                            description:
+                                `Exchange hashpartitioning uses the default 200 partitions for ${formatBytes(wideSize)} of data ` +
+                                `(~${avgMB.toFixed(0)} MB per partition). This is likely under-partitioned — large partitions ` +
+                                `cause slow tasks and spill to disk. ` +
+                                `Increase to ~${optimalParts} partitions (targeting ~200 MB each).`,
+                            costPoints: 40,
+                            planLine: trimmed,
+                        });
+                    }
                 }
             }
         }
@@ -214,6 +242,55 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
                 });
             } else {
                 seenInMemoryKeys.add(fp);
+            }
+
+            // ── Disk spill: data already stored on or overflowing to disk ────────
+
+            if (/StorageLevel\s*\(/i.test(trimmed)) {
+                const hasMemory = /StorageLevel\s*\([^)]*\bmemory\b/i.test(trimmed);
+                const hasDisk   = /StorageLevel\s*\([^)]*\bdisk\b/i.test(trimmed);
+
+                if (hasDisk && hasMemory) {
+                    // MEMORY_AND_DISK — overflowed to disk, spill is occurring
+                    issues.push({
+                        type: 'cache',
+                        name: 'CacheDiskSpill',
+                        description:
+                            'Cached DataFrame is spilling to disk (MEMORY_AND_DISK storage level). ' +
+                            'The dataset exceeds available executor memory. ' +
+                            'Cache a narrower projection (.select(...).cache()), ' +
+                            'increase executor memory, or remove the cache entirely if recompute is cheaper.',
+                        costPoints: 70,
+                        planLine: trimmed,
+                    });
+                } else if (hasDisk && !hasMemory) {
+                    // DISK_ONLY — every read goes to disk, potentially slower than recomputing
+                    issues.push({
+                        type: 'cache',
+                        name: 'CacheDiskSpill',
+                        description:
+                            'Cached DataFrame uses DISK_ONLY storage — all reads require disk I/O. ' +
+                            'This can be slower than recomputing from source for simple transformations. ' +
+                            'Increase executor memory to allow in-memory caching, or remove cache() if reads are infrequent.',
+                        costPoints: 50,
+                        planLine: trimmed,
+                    });
+                }
+
+                // ── Deserialized Java objects — high heap and GC pressure ─────────
+                if (/StorageLevel\s*\([^)]*\bdeserialized\b/i.test(trimmed)) {
+                    issues.push({
+                        type: 'cache',
+                        name: 'CacheDeserialized',
+                        description:
+                            'Cached DataFrame uses deserialized Java objects (MEMORY_ONLY default). ' +
+                            'Deserialized storage consumes 3-5× more heap than Kryo-serialized storage ' +
+                            'and causes heavy GC pressure on large DataFrames. ' +
+                            'Enable Kryo and use MEMORY_ONLY_SER to significantly reduce memory usage.',
+                        costPoints: 30,
+                        planLine: trimmed,
+                    });
+                }
             }
 
             // Memory spill risk: compare sizeInBytes against cluster storage capacity

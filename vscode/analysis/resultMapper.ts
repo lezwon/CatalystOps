@@ -175,6 +175,9 @@ function planIssueTitle(name: string): string {
         FirstWithoutOrdering: 'first() Without Ordering Guarantee',
         RepeatedFileScan: 'Same Source Scanned Multiple Times',
         LargeDfPersisted: 'Large DataFrame Cached',
+        CacheDiskSpill: 'Cache Spilling to Disk',
+        CacheDeserialized: 'Cache Using Deserialized Java Objects',
+        DefaultShufflePartitions: 'Default 200 Shuffle Partitions on Large Data',
     };
     return titles[name] ?? name;
 }

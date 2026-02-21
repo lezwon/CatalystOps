@@ -188,6 +188,19 @@ const ISSUE_INFO: Record<string, FixEntry> = {
         detail: 'A large DataFrame is being cached. Caching only the columns you need reduces memory pressure and spill risk.',
         fix: '# Cache only needed columns:\ndf.select("col1", "col2", "col3").cache()\n\n# Unpersist when done:\ndf_cached.unpersist()',
     },
+    'Cache Spilling to Disk': {
+        detail: 'The cached DataFrame has exceeded executor memory and is spilling to or stored on disk, significantly degrading read performance.',
+        fix: '# Option 1 — cache fewer columns:\ndf.select("col1", "col2").cache()\n\n# Option 2 — explicit disk-only (predictable I/O, no OOM):\nfrom pyspark import StorageLevel\ndf.persist(StorageLevel.DISK_ONLY)\n\n# Option 3 — remove cache if recompute is cheap:\ndf.unpersist()',
+    },
+    'Cache Using Deserialized Java Objects': {
+        detail: 'The cache uses deserialized Java objects (default MEMORY_ONLY). This consumes 3-5× more heap than Kryo-serialized storage and causes heavy GC pressure.',
+        fix: '# Enable Kryo serializer in Spark config:\nspark.conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")\n\n# Then use serialized storage level:\nfrom pyspark import StorageLevel\ndf.persist(StorageLevel.MEMORY_ONLY_SER)  # ~3-5x smaller than MEMORY_ONLY',
+    },
+    'Default 200 Shuffle Partitions on Large Data': {
+        detail: 'Exchange hashpartitioning is using the default 200 partitions on a large dataset, producing oversized partitions that risk spill and slow task execution.',
+        fix: '# Tune for ~200 MB per partition:\nspark.conf.set("spark.sql.shuffle.partitions", 1000)  # adjust to your data size\n\n# Or let AQE tune it automatically (Spark 3.0+):\nspark.conf.set("spark.sql.adaptive.enabled", "true")\nspark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")',
+        config: { 'spark.sql.shuffle.partitions': '1000' },
+    },
 };
 
 export function createHoverProvider(): vscode.HoverProvider {
