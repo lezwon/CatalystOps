@@ -101,6 +101,11 @@
           "type": "number",
           "default": 0.4,
           "description": "DBU rate per hour for cost estimation (dollars)"
+        },
+        "catalystops.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable debug logging (logs equivalent curl commands for every Databricks API call to the Output panel)"
         }
       }
     },

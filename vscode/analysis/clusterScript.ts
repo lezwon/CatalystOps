@@ -255,6 +255,7 @@ export function generateClusterScript(
 ${fileManifest}
 
 import json
+import time as _time
 import traceback
 from datetime import datetime
 
@@ -331,9 +332,12 @@ _cluster_info = _catalystops_get_cluster_info()
 # Analyze each DataFrame
 for _df_name, _df in _catalystops_dfs.items():
     try:
+        _plan_start = _time.time()
         _plan = _catalystops_get_plan(_df)
+        _plan_duration_ms = int((_time.time() - _plan_start) * 1000)
         _catalystops_results.append({
             "analysisTime": datetime.now().isoformat(),
+            "planDurationMs": _plan_duration_ms,
             "dataframeName": _df_name,
             "summary": {"critical": 0, "warnings": 0, "info": 0, "suggestions": 0},
             "cluster": _cluster_info,
@@ -347,7 +351,7 @@ for _df_name, _df in _catalystops_dfs.items():
                 "aggregationCount": 0,
             },
             "dataStats": {
-                "partitionCount": _df.rdd.getNumPartitions() if _plan else 0,
+                "partitionCount": _df.sparkSession.sparkContext.defaultParallelism,
                 "columnCount": len(_df.columns),
                 "hasNestedTypes": False,
                 "nullPercentages": {},
@@ -362,27 +366,10 @@ for _df_name, _df in _catalystops_dfs.items():
             "error": str(_e),
         })
 
-# Check table statistics
-_catalystops_table_stats = {}
-try:
-    for _tbl in spark.catalog.listTables():
-        try:
-            _db = _tbl.database or "default"
-            _fqn = f"{_db}.{_tbl.name}"
-            _desc = spark.sql(f"DESCRIBE EXTENDED {_fqn}")
-            _stats_row = _desc.filter("col_name = 'Statistics'").collect()
-            _has_stats = len(_stats_row) > 0 and 'bytes' in str(_stats_row[0])
-            _catalystops_table_stats[_fqn] = _has_stats
-        except:
-            pass
-except:
-    pass
-
 # Output results between sentinel markers
 _output = json.dumps({
     "results": _catalystops_results,
     "errors": _catalystops_errors,
-    "tableStats": _catalystops_table_stats,
 })
 print("${RESULT_START_MARKER}")
 print(_output)

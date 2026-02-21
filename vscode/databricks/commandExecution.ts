@@ -92,6 +92,7 @@ export async function executeCommand(
     token: string,
     clusterId: string,
     code: string,
+    onProgress?: (elapsedMs: number) => void,
 ): Promise<CommandResult> {
     const contextId = await getOrCreateContext(host, token, clusterId);
 
@@ -106,7 +107,7 @@ export async function executeCommand(
     }
 
     const commandId = execResp.data.id;
-    return pollCommand(host, token, clusterId, contextId, commandId);
+    return pollCommand(host, token, clusterId, contextId, commandId, onProgress);
 }
 
 async function pollCommand(
@@ -115,8 +116,10 @@ async function pollCommand(
     clusterId: string,
     contextId: string,
     commandId: string,
+    onProgress?: (elapsedMs: number) => void,
 ): Promise<CommandResult> {
-    const deadline = Date.now() + POLLING.timeoutMs;
+    const start = Date.now();
+    const deadline = start + POLLING.timeoutMs;
     let delay: number = POLLING.initialDelayMs;
 
     while (Date.now() < deadline) {
@@ -130,6 +133,7 @@ async function pollCommand(
             return resp.data;
         }
 
+        onProgress?.(Date.now() - start);
         await sleep(delay);
         delay = Math.min(delay * POLLING.backoffMultiplier, POLLING.maxDelayMs);
     }
@@ -145,7 +149,7 @@ async function pollCommand(
         // Best effort cancel
     }
 
-    throw new Error('Command execution timed out after 60 seconds');
+    throw new Error(`Command execution timed out after ${POLLING.timeoutMs / 1000} seconds`);
 }
 
 /**

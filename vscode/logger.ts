@@ -21,6 +21,15 @@ export function logError(message: string): void {
     log(`ERROR: ${message}`);
 }
 
+export function logDebug(message: string): void {
+    const debugEnabled = vscode.workspace
+        .getConfiguration('catalystops')
+        .get<boolean>('debug', false);
+    if (debugEnabled) {
+        log(`[debug] ${message}`);
+    }
+}
+
 export function showOutput(): void {
     _channel?.show(true);
 }

@@ -6,7 +6,15 @@ import * as vscode from 'vscode';
 import { CodeIssue, Severity, AnalysisResult, Issue } from '../models/types';
 import { SEVERITY_PRIORITY } from '../models/types';
 
-type TreeItem = SeverityGroupItem | IssueItem;
+export type ProgressStepStatus = 'pending' | 'running' | 'done' | 'error';
+
+export interface ProgressStep {
+    label: string;
+    status: ProgressStepStatus;
+    detail?: string;
+}
+
+type TreeItem = ProgressGroupItem | ProgressStepItem | SeverityGroupItem | IssueItem;
 
 export class IssuesTreeDataProvider implements vscode.TreeDataProvider<TreeItem> {
     private _onDidChangeTreeData = new vscode.EventEmitter<TreeItem | undefined>();
@@ -14,6 +22,17 @@ export class IssuesTreeDataProvider implements vscode.TreeDataProvider<TreeItem>
 
     private issues: CodeIssue[] = [];
     private clusterIssues: Issue[] = [];
+    private progressSteps: ProgressStep[] = [];
+
+    setProgress(steps: ProgressStep[]): void {
+        this.progressSteps = [...steps];
+        this._onDidChangeTreeData.fire(undefined);
+    }
+
+    clearProgress(): void {
+        this.progressSteps = [];
+        this._onDidChangeTreeData.fire(undefined);
+    }
 
     updateFromCodeIssues(issues: CodeIssue[]): void {
         this.issues = issues;
@@ -32,8 +51,16 @@ export class IssuesTreeDataProvider implements vscode.TreeDataProvider<TreeItem>
 
     getChildren(element?: TreeItem): TreeItem[] {
         if (!element) {
-            // Root: show severity groups
-            return this.getSeverityGroups();
+            const items: TreeItem[] = [];
+            if (this.progressSteps.length > 0) {
+                items.push(new ProgressGroupItem(this.progressSteps));
+            }
+            items.push(...this.getSeverityGroups());
+            return items;
+        }
+
+        if (element instanceof ProgressGroupItem) {
+            return element.children;
         }
 
         if (element instanceof SeverityGroupItem) {
@@ -96,6 +123,29 @@ class IssueItem extends vscode.TreeItem {
                 arguments: [{ lineNumber: issue.line, at: 'center' }],
             };
         }
+    }
+}
+
+class ProgressGroupItem extends vscode.TreeItem {
+    children: ProgressStepItem[];
+    constructor(steps: ProgressStep[]) {
+        super('Execution Progress', vscode.TreeItemCollapsibleState.Expanded);
+        this.iconPath = new vscode.ThemeIcon('pulse');
+        this.children = steps.map(s => new ProgressStepItem(s));
+    }
+}
+
+class ProgressStepItem extends vscode.TreeItem {
+    constructor(step: ProgressStep) {
+        super(step.label, vscode.TreeItemCollapsibleState.None);
+        this.description = step.detail;
+        const icons: Record<ProgressStepStatus, string> = {
+            pending: 'circle-outline',
+            running: 'loading~spin',
+            done: 'pass',
+            error: 'error',
+        };
+        this.iconPath = new vscode.ThemeIcon(icons[step.status]);
     }
 }
 

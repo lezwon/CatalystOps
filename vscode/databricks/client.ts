@@ -5,6 +5,7 @@
 
 import * as https from 'https';
 import * as url from 'url';
+import { logDebug } from '../logger';
 
 export interface RequestOptions {
     host: string;
@@ -21,12 +22,47 @@ export interface ApiResponse<T = unknown> {
 }
 
 /**
+ * Build an equivalent curl command for logging/debugging.
+ * Redacts the token and truncates large bodies (e.g. the script payload).
+ */
+function toCurl(options: RequestOptions, bodyStr: string | undefined): string {
+    const fullUrl = new URL(options.path, options.host).toString();
+    const redacted = options.token.length > 8
+        ? `${options.token.substring(0, 4)}${'*'.repeat(options.token.length - 4)}`
+        : '****';
+
+    const parts = [
+        `curl -X ${options.method}`,
+        `  '${fullUrl}'`,
+        `  -H 'Authorization: Bearer ${redacted}'`,
+        `  -H 'Content-Type: application/json'`,
+    ];
+
+    if (bodyStr) {
+        // Replace the 'command' field (full Python script) with a size hint
+        let display = bodyStr;
+        try {
+            const obj = JSON.parse(bodyStr);
+            if (typeof obj.command === 'string') {
+                obj.command = `<script: ${obj.command.length} chars>`;
+                display = JSON.stringify(obj);
+            }
+        } catch { /* leave as-is */ }
+        parts.push(`  -d '${display}'`);
+    }
+
+    return parts.join(' \\\n');
+}
+
+/**
  * Make an authenticated request to the Databricks REST API.
  */
 export function apiRequest<T = unknown>(options: RequestOptions): Promise<ApiResponse<T>> {
     return new Promise((resolve, reject) => {
         const parsed = new URL(options.path, options.host);
         const bodyStr = options.body ? JSON.stringify(options.body) : undefined;
+
+        logDebug(toCurl(options, bodyStr));
 
         const reqOptions: https.RequestOptions = {
             hostname: parsed.hostname,

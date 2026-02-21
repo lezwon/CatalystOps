@@ -100,6 +100,7 @@ export interface IssueSummary {
 
 export interface AnalysisResult {
     analysisTime: string;
+    planDurationMs?: number;
     dataframeName?: string;
     summary: IssueSummary;
     cluster: ClusterInfo;

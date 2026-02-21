@@ -107,6 +107,30 @@ export function estimateDollarCost(
 }
 
 /**
+ * Estimate dollar cost from actual measured execution duration.
+ *
+ * When AQE is enabled, queryExecution().executedPlan() triggers real query
+ * execution and returns runtime statistics — so planDurationMs is the true
+ * wall-clock time the query spent on the cluster.
+ *
+ * Formula: dollars = (durationMs / 3_600_000) * (totalCores / coresPerDBU) * dbuRate
+ */
+export function estimateDollarCostFromDuration(
+    durationMs: number,
+    cluster: ClusterInfo,
+    dbuRatePerHour?: number,
+): DollarEstimate {
+    const rate = dbuRatePerHour ?? DBU_DEFAULTS.defaultDBURatePerHour;
+    const dbus = (cluster.totalCores / DBU_DEFAULTS.coresPerDBU) * (durationMs / 3_600_000);
+    const dollars = dbus * rate;
+    return {
+        formatted: dollars < 0.0001 ? '<$0.0001' : `$${dollars.toFixed(4)}`,
+        dollars,
+        costPoints: 0,
+    };
+}
+
+/**
  * Get a human-readable cost label.
  */
 export function costLabel(totalCost: number): string {

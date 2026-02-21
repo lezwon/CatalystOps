@@ -42,7 +42,7 @@ export const POLLING = {
     initialDelayMs: 200,
     maxDelayMs: 10000,
     backoffMultiplier: 1.5,
-    timeoutMs: 180000,
+    timeoutMs: 300000,
 } as const;
 
 /** Actions that need to be neutralized in safety wrapper */
