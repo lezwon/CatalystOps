@@ -241,7 +241,7 @@ export async function analyzeCost(
         addStep('Estimated cost', 'done', costDetail);
 
         setCodeIssueDiagnostics(editor.document.uri, allIssues);
-        issuesTreeProvider.updateFromAnalysisResults(analysisResults, localIssues);
+        issuesTreeProvider.updateFromCodeIssues(allIssues);
         updateStatusBar(allIssues);
 
         const totalIssues = allIssues.length;

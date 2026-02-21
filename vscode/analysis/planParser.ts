@@ -388,6 +388,15 @@ function extractFileScanPath(trimmed: string): string | null {
     return m ? m[1] : null;
 }
 
+/** Format a byte count into a human-readable string. Exported for use in UI layers. */
+export function formatPlanBytes(bytes: number): string {
+    if (bytes >= 1024 ** 4) { return `${(bytes / 1024 ** 4).toFixed(1)} TiB`; }
+    if (bytes >= 1024 ** 3) { return `${(bytes / 1024 ** 3).toFixed(1)} GiB`; }
+    if (bytes >= 1024 ** 2) { return `${(bytes / 1024 ** 2).toFixed(1)} MiB`; }
+    if (bytes >= 1024) { return `${(bytes / 1024).toFixed(1)} KiB`; }
+    return `${bytes} B`;
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────────
 
 /** Calculate total cost score from plan issues. */
@@ -403,5 +412,67 @@ export function parsePlanFromResults(results: AnalysisResult[]): PlanIssue[] {
             allIssues.push(...parsePlan(result.executionPlan.physicalPlan, result.cluster));
         }
     }
-    return allIssues;
+    // Deduplicate by name — show each issue type once regardless of how many DataFrames trigger it
+    const seen = new Map<string, PlanIssue>();
+    for (const issue of allIssues) {
+        if (!seen.has(issue.name)) {
+            seen.set(issue.name, issue);
+        }
+    }
+    return Array.from(seen.values());
+}
+
+export interface RootStats {
+    /** Output row count. null = not present or unknown (-1). */
+    rowCount: number | null;
+    /** Output size in bytes. null = not present. */
+    sizeInBytes: number | null;
+    /** True when AQE collected these at runtime; false = optimizer estimate. */
+    isRuntime: boolean;
+}
+
+/**
+ * Extract output-level statistics for a DataFrame from its physical plan text.
+ *
+ * Spark prints statistics on each QueryStage / operator node. The first
+ * Statistics(...) encountered scanning top-to-bottom belongs to the root
+ * output node (ResultQueryStage for AQE plans, or the top-level operator
+ * for non-AQE plans) — this represents the final result set of the query.
+ *
+ * rowCount values can be integers or scientific notation (e.g. 2.51E+4).
+ */
+export function extractRootStats(planText: string): RootStats {
+    const statsRe = /Statistics\(([^)]+)\)/i;
+
+    for (const line of planText.split('\n')) {
+        const m = statsRe.exec(line);
+        if (!m) { continue; }
+
+        const inner = m[1];
+        const isRuntime = /isRuntime=true/i.test(inner);
+
+        // sizeInBytes=785.9 KiB
+        const sizeMatch = inner.match(/sizeInBytes=([\d.]+)\s*(B|KiB|MiB|GiB|TiB)/i);
+        let sizeInBytes: number | null = null;
+        if (sizeMatch) {
+            const units: Record<string, number> = {
+                B: 1, KiB: 1024, MiB: 1024 ** 2, GiB: 1024 ** 3, TiB: 1024 ** 4,
+            };
+            sizeInBytes = parseFloat(sizeMatch[1]) * (units[sizeMatch[2]] ?? 1);
+        }
+
+        // rowCount=1  or  rowCount=2.51E+4  or  rowCount=-1 (unknown)
+        const rowMatch = inner.match(/rowCount=([\d.E+\-]+)/i);
+        let rowCount: number | null = null;
+        if (rowMatch) {
+            const v = parseFloat(rowMatch[1]);
+            if (!isNaN(v) && v >= 0) {
+                rowCount = Math.round(v);
+            }
+        }
+
+        return { rowCount, sizeInBytes, isRuntime };
+    }
+
+    return { rowCount: null, sizeInBytes: null, isRuntime: false };
 }

@@ -4,7 +4,7 @@
 
 import * as vscode from 'vscode';
 import { CodeIssue, Severity } from '../models/types';
-import { DIAGNOSTIC_SOURCE, SEVERITY_TO_DIAGNOSTIC } from '../models/constants';
+import { DIAGNOSTIC_SOURCE } from '../models/constants';
 
 let diagnosticCollection: vscode.DiagnosticCollection;
 
@@ -31,12 +31,11 @@ export function setCodeIssueDiagnostics(uri: vscode.Uri, issues: CodeIssue[]): v
 
         const diagnostic = new vscode.Diagnostic(
             range,
-            `${issue.title}: ${issue.description}`,
+            issue.title,
             severityToVscode(issue.severity),
         );
 
         diagnostic.source = DIAGNOSTIC_SOURCE;
-        diagnostic.code = issue.id;
 
         return diagnostic;
     });

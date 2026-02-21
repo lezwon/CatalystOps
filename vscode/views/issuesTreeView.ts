@@ -91,10 +91,13 @@ class SeverityGroupItem extends vscode.TreeItem {
     children: IssueItem[];
 
     constructor(severity: Severity, issues: (CodeIssue | Issue)[]) {
-        const icon = severityIcon(severity);
         super(
-            `${icon} ${severity.toUpperCase()} (${issues.length})`,
+            `${severity.toUpperCase()} (${issues.length})`,
             vscode.TreeItemCollapsibleState.Expanded,
+        );
+        this.iconPath = new vscode.ThemeIcon(
+            severityThemeIcon(severity),
+            severityColor(severity),
         );
         this.children = issues.map(i => new IssueItem(i));
     }
@@ -104,7 +107,7 @@ class IssueItem extends vscode.TreeItem {
     constructor(issue: CodeIssue | Issue) {
         super(issue.title, vscode.TreeItemCollapsibleState.None);
 
-        this.description = issue.id;
+        this.description = issue.location ?? '';
         this.tooltip = new vscode.MarkdownString(
             `**${issue.title}**\n\n${issue.description}\n\n` +
             (issue.fix?.description ? `**Fix:** ${issue.fix.description}` : ''),
@@ -149,14 +152,6 @@ class ProgressStepItem extends vscode.TreeItem {
     }
 }
 
-function severityIcon(severity: Severity): string {
-    switch (severity) {
-        case Severity.CRITICAL: return '$(error)';
-        case Severity.WARNING: return '$(warning)';
-        case Severity.INFO: return '$(info)';
-        case Severity.SUGGESTION: return '$(lightbulb)';
-    }
-}
 
 function severityThemeIcon(severity: Severity): string {
     switch (severity) {
