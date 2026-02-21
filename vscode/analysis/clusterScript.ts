@@ -290,7 +290,7 @@ def _catalystops_get_cluster_info():
         }
 
 def _catalystops_get_plan(df):
-    """Get explain(formatted) output as a string."""
+    """Get physical explain output as a string."""
     try:
         return df._jdf.queryExecution().executedPlan().toString()
     except Exception:
@@ -302,6 +302,13 @@ def _catalystops_get_plan(df):
             return buf.getvalue()
         except Exception:
             return ""
+
+def _catalystops_get_logical_plan(df):
+    """Get analyzed logical plan as a string (shows original table references)."""
+    try:
+        return df._jdf.queryExecution().analyzed().toString()
+    except Exception:
+        return ""
 
 # Execute neutralized user code (with imported project files inlined above)
 # Use a single namespace seeded with globals() so that imports made inside
@@ -343,7 +350,7 @@ for _df_name, _df in _catalystops_dfs.items():
             "cluster": _cluster_info,
             "executionPlan": {
                 "physicalPlan": _plan,
-                "logicalPlan": "",
+                "logicalPlan": _catalystops_get_logical_plan(_df),
                 "operators": [],
                 "totalStages": 0,
                 "totalShuffles": 0,

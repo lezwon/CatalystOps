@@ -13,7 +13,7 @@ import { generateClusterScript, extractResult } from '../analysis/clusterScript'
 import { analyzeCode } from '../analysis/codeAnalyzer';
 import { parsePlanFromResults } from '../analysis/planParser';
 import { mapResultsToDiagnostics, mapPlanIssuesToDiagnostics } from '../analysis/resultMapper';
-import { updateCache, getAllLineCosts } from '../analysis/analysisCache';
+import { updateCache } from '../analysis/analysisCache';
 import { estimateDollarCost, estimateDollarCostFromDuration, costLabel } from '../analysis/costModel';
 import { setCodeIssueDiagnostics } from '../providers/diagnosticsProvider';
 import { setAnalyzing, setResults, setError, setIdle } from '../views/statusBar';
@@ -204,21 +204,12 @@ export async function analyzeCost(
             );
         }
 
-        // Parse plan issues and update analysis cache with dollar estimates
+        // Parse plan issues and update analysis cache (for CodeLens refresh trigger)
         const planIssues = parsePlanFromResults(analysisResults);
         const cluster = analysisResults[0]?.cluster;
         const dbuRate = vscode.workspace.getConfiguration('catalystops')
             .get<number>('cost.dbuRatePerHour');
         updateCache(analysisResults, planIssues, editor.document);
-
-        // Enrich cache entries with dollar estimates
-        const lineCosts = getAllLineCosts(editor.document.uri.toString());
-        if (lineCosts && cluster) {
-            for (const [, entry] of lineCosts) {
-                const est = estimateDollarCost(entry.costPoints, cluster, dbuRate);
-                entry.dollarEstimate = est.formatted;
-            }
-        }
 
         const clusterDiagnostics = mapResultsToDiagnostics(analysisResults, editor.document);
         const planDiagnostics = mapPlanIssuesToDiagnostics(planIssues, editor.document, analysisResults);

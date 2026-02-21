@@ -127,7 +127,6 @@ export function mapPlanIssuesToDiagnostics(
             title: planIssueTitle(pi.name),
             description: pi.description,
             location: `Line ${line + 1}`,
-            impact: `Cost: ${pi.costPoints} pts`,
             fix: { description: '' },
             line,
             column,
@@ -175,6 +174,7 @@ function planIssueTitle(name: string): string {
         CsvRead: 'CSV Format — Use Parquet/Delta',
         FirstWithoutOrdering: 'first() Without Ordering Guarantee',
         RepeatedFileScan: 'Same Source Scanned Multiple Times',
+        LargeDfPersisted: 'Large DataFrame Cached',
     };
     return titles[name] ?? name;
 }
@@ -187,11 +187,33 @@ function resolvePlanIssueLocation(
     lines: string[],
     dataframeName?: string,
 ): { line: number; column: number } {
+    // For repeated reads, use the captured table/path name to find the exact read call
+    if (issue.name === 'RepeatedFileScan' && issue.tableName) {
+        const tableParts = issue.tableName.split('.');
+        // Try progressively shorter name segments (catalog.schema.table → schema.table → table)
+        for (let depth = 0; depth < tableParts.length; depth++) {
+            const lookup = tableParts.slice(depth).join('.');
+            for (let i = 0; i < lines.length; i++) {
+                const l = lines[i];
+                if (/spark\.(table|read)/.test(l) &&
+                    (l.includes(`"${lookup}"`) || l.includes(`'${lookup}'`))) {
+                    return { line: i, column: l.indexOf('spark') };
+                }
+            }
+        }
+        // Fallback: any spark.table or spark.read call
+        for (let i = 0; i < lines.length; i++) {
+            if (/spark\.(table|read)\s*[\.(]/.test(lines[i])) {
+                return { line: i, column: 0 };
+            }
+        }
+    }
+
     const patterns: Record<string, RegExp[]> = {
         join: [/\.join\s*\(/, /\.crossJoin\s*\(/],
         shuffle: [/\.groupBy\s*\(/, /\.orderBy\s*\(/, /\.sort\s*\(/, /\.repartition\s*\(/],
         statistics: [/spark\.table\s*\(/, /spark\.read\.table\s*\(/],
-        cache: [/\.cache\s*\(/, /\.persist\s*\(/, /spark\.read\s*\./],
+        cache: [/\.cache\s*\(/, /\.persist\s*\(/, /\.checkpoint\s*\(/, /spark\.read\s*\./],
         format: [/\.csv\s*\(/, /read\.csv/, /format\s*\(\s*["']csv/i, /format\s*\(\s*["']text/i],
         partition: [/\.repartition\s*\(/, /\.coalesce\s*\(/],
         aggregation: [/\.agg\s*\(/, /\.first\s*\(/, /\.groupBy\s*\(/],

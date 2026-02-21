@@ -291,20 +291,46 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
 
         const fileScanPath = extractFileScanPath(trimmed);
         if (fileScanPath) {
+            const scanSize = parseSizeBytes(trimmed);
             const count = (seenFileScanPaths.get(fileScanPath) ?? 0) + 1;
             seenFileScanPaths.set(fileScanPath, count);
             if (count === 2) {
+                const isLarge = scanSize !== null && scanSize > 512 * 1024 * 1024;
                 issues.push({
                     type: 'cache',
                     name: 'RepeatedFileScan',
-                    description:
-                        `"${fileScanPath}" is scanned more than once in this query plan. ` +
-                        'Cache the DataFrame after the first read to avoid repeated I/O:\n' +
-                        '  df = spark.read.parquet("...").cache()\n' +
-                        'For small DataFrames, also consider broadcast(df) to eliminate the scan entirely.',
-                    costPoints: 30,
+                    description: isLarge
+                        ? `"${fileScanPath}" (${formatBytes(scanSize!)}) is scanned more than once without caching. ` +
+                          'Reading this large dataset repeatedly is very expensive. Cache after the first read.'
+                        : `"${fileScanPath}" is scanned more than once without caching. ` +
+                          'Cache after the first read to avoid repeated I/O.',
+                    costPoints: isLarge ? 60 : 30,
                     planLine: trimmed,
+                    tableName: fileScanPath,
                 });
+            }
+        }
+
+        // ── Large DataFrame being persisted ───────────────────────────────────
+
+        if (/InMemoryRelation/i.test(trimmed)) {
+            const sizeBytes = parseSizeBytes(trimmed);
+            if (sizeBytes !== null && sizeBytes > 5 * 1024 ** 3) {
+                const spill = checkCacheSpillRisk(sizeBytes, cluster);
+                if (spill === 'ok') {
+                    // Large but fits in memory — warn to cache selectively
+                    issues.push({
+                        type: 'cache',
+                        name: 'LargeDfPersisted',
+                        description:
+                            `A ${formatBytes(sizeBytes)} DataFrame is being cached. ` +
+                            'Verify that all columns are needed in the cache — caching a narrow projection reduces memory pressure:\n' +
+                            '  df.select("col1", "col2").cache()  # cache only needed columns',
+                        costPoints: 25,
+                        planLine: trimmed,
+                    });
+                }
+                // Note: spill === 'warn' / 'high' are handled by LargeCache / CacheMemorySpillRisk above
             }
         }
     }
@@ -384,8 +410,65 @@ function findSmallSide(segment: string): number | null {
 
 /** Extract a stable table/path identifier from a FileScan line. */
 function extractFileScanPath(trimmed: string): string | null {
-    const m = trimmed.match(/FileScan\s+\w+\s+([\w.]+)\[/i);
-    return m ? m[1] : null;
+    // Format 1: FileScan parquet schema.table[columns...]
+    const tableMatch = trimmed.match(/FileScan\s+\w+\s+([\w.]+)\s*\[/i);
+    if (tableMatch) { return tableMatch[1]; }
+
+    // Format 2: FileScan csv [/path/to/file.csv, ...][columns...]
+    const pathMatch = trimmed.match(/FileScan\s+\w+\s+\[([^[\]]+)\]/i);
+    if (pathMatch) {
+        const first = pathMatch[1].split(',')[0].trim().replace(/^file:/i, '');
+        const parts = first.replace(/\\/g, '/').split('/').filter(Boolean);
+        // Use last two path segments as a stable key (dir/filename)
+        return parts.length >= 2 ? parts.slice(-2).join('/') : first;
+    }
+
+    return null;
+}
+
+/**
+ * Parse the analyzed logical plan for repeated table reads.
+ *
+ * The analyzed logical plan preserves the original table references before
+ * Catalyst optimization — SubqueryAlias nodes identify each table access.
+ * When the same alias appears twice, the table is read without caching.
+ */
+export function parseLogicalPlan(planText: string): PlanIssue[] {
+    if (!planText) { return []; }
+    const issues: PlanIssue[] = [];
+    const seenAliases = new Map<string, number>();
+
+    for (const line of planText.split('\n')) {
+        const trimmed = line.trim();
+
+        // SubqueryAlias schema.table  or  SubqueryAlias table_name
+        const aliasMatch = trimmed.match(/^SubqueryAlias\s+([\w.]+)/i);
+        if (!aliasMatch) { continue; }
+
+        const name = aliasMatch[1];
+        // Skip Spark internal aliases (spark_catalog prefix is fine; skip anonymous __auto_generated_...)
+        if (name.startsWith('__') || name === 'spark_catalog') { continue; }
+
+        const count = (seenAliases.get(name) ?? 0) + 1;
+        seenAliases.set(name, count);
+
+        if (count === 2) {
+            // Strip catalog prefix to get a short display name
+            const shortName = name.split('.').slice(-1)[0];
+            issues.push({
+                type: 'cache',
+                name: 'RepeatedFileScan',
+                description:
+                    `Table "${shortName}" is read ${count}+ times without caching. ` +
+                    'Each reference triggers a separate scan. Cache after the first read to reuse the result.',
+                costPoints: 40,
+                planLine: trimmed,
+                tableName: name,
+            });
+        }
+    }
+
+    return issues;
 }
 
 /** Format a byte count into a human-readable string. Exported for use in UI layers. */
@@ -404,18 +487,30 @@ export function calculatePlanCost(issues: PlanIssue[]): number {
     return issues.reduce((total, issue) => total + issue.costPoints, 0);
 }
 
-/** Parse plan data from cluster analysis results. Passes cluster info for memory-aware checks. */
+/**
+ * Parse plan data from cluster analysis results.
+ * Analyses both physical plan (for FileScan, caches, joins) and
+ * analyzed logical plan (for repeated table reads — cleaner table names).
+ */
 export function parsePlanFromResults(results: AnalysisResult[]): PlanIssue[] {
     const allIssues: PlanIssue[] = [];
     for (const result of results) {
         if (result.executionPlan?.physicalPlan) {
             allIssues.push(...parsePlan(result.executionPlan.physicalPlan, result.cluster));
         }
+        // Logical plan gives cleaner table names for repeated-read detection.
+        // Results are merged with physical plan results below.
+        if (result.executionPlan?.logicalPlan) {
+            allIssues.push(...parseLogicalPlan(result.executionPlan.logicalPlan));
+        }
     }
-    // Deduplicate by name — show each issue type once regardless of how many DataFrames trigger it
+
+    // Deduplicate: prefer issues with a tableName (more informative) when the
+    // same issue name appears multiple times. Otherwise keep first seen.
     const seen = new Map<string, PlanIssue>();
     for (const issue of allIssues) {
-        if (!seen.has(issue.name)) {
+        const existing = seen.get(issue.name);
+        if (!existing || (!existing.tableName && issue.tableName)) {
             seen.set(issue.name, issue);
         }
     }

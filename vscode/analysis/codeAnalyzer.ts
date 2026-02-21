@@ -453,6 +453,22 @@ from pyspark.sql.functions import broadcast
 result = large_df.join(broadcast(small_df), "key")`,
         },
     },
+    {
+        id: 'CODE_CHECKPOINT_001',
+        name: 'checkpoint() Usage',
+        pattern: /\.checkpoint\s*\(\s*\)/g,
+        severity: Severity.WARNING,
+        category: IssueCategory.CACHING,
+        description: 'checkpoint() writes the full DataFrame to distributed storage and truncates the lineage graph, incurring I/O cost every time. Use .cache() for in-memory persistence, or .localCheckpoint() for faster checkpointing without HDFS writes',
+        fix: {
+            description: 'Prefer cache() for in-memory or localCheckpoint() for faster checkpointing',
+            code: `# In-memory (fastest reads, requires executor memory):
+df.cache()
+
+# Local checkpoint (no HDFS write, faster than checkpoint()):
+df.localCheckpoint()`,
+        },
+    },
 ];
 
 /**

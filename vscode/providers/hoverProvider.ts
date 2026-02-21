@@ -74,11 +74,6 @@ const ISSUE_INFO: Record<string, FixEntry> = {
         detail: 'first() returns an arbitrary value in distributed execution — result is non-deterministic between runs.',
         fix: '# Deterministic alternative:\ndf.groupBy("key").agg(F.min("col"))\n\n# Or sort first if order matters:\ndf.orderBy("col").groupBy("key").agg(F.first("col"))',
     },
-    'Same Source Scanned Multiple Times': {
-        detail: 'The same data source is read more than once in this plan. Cache after the first read to avoid repeated I/O.',
-        fix: 'df = spark.read.parquet("path/").cache()\n\n# For small DataFrames also consider broadcast:\nfrom pyspark.sql.functions import broadcast',
-    },
-
     // ── Local code issues ──────────────────────────────────────────────────────
 
     'UDF Usage Detected': {
@@ -180,6 +175,18 @@ const ISSUE_INFO: Record<string, FixEntry> = {
     'Join Without broadcast()': {
         detail: 'If one side is small, wrapping it in broadcast() avoids an expensive shuffle join.',
         fix: 'from pyspark.sql.functions import broadcast\nresult = large_df.join(broadcast(small_df), "key")',
+    },
+    'checkpoint() Usage': {
+        detail: 'checkpoint() writes the full DataFrame to HDFS/S3 and truncates the lineage graph. This incurs I/O cost every time it runs.',
+        fix: '# In-memory persistence (fastest reads):\ndf.cache()\n\n# Local checkpoint (no HDFS write, truncates lineage):\ndf.localCheckpoint()',
+    },
+    'Same Source Scanned Multiple Times': {
+        detail: 'The physical/logical plan shows this table or file is scanned more than once. Each scan triggers separate I/O and compute. Cache after the first read and reuse the result.',
+        fix: 'df = spark.table("my_table").cache()\n# or:\ndf = spark.read.parquet("path/").cache()\n\n# Reuse df everywhere instead of reading again',
+    },
+    'Large DataFrame Cached': {
+        detail: 'A large DataFrame is being cached. Caching only the columns you need reduces memory pressure and spill risk.',
+        fix: '# Cache only needed columns:\ndf.select("col1", "col2", "col3").cache()\n\n# Unpersist when done:\ndf_cached.unpersist()',
     },
 };
 
