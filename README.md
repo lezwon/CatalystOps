@@ -1,6 +1,6 @@
 # CatalystOps — PySpark Optimizer
 
-**CatalystOps** catches PySpark performance issues before they hit production. It detects **30+ anti-patterns** locally in real time and runs **safe dry-run analysis** on a Databricks cluster to inspect Catalyst execution plans — all without executing Spark jobs or touching your data.
+**CatalystOps** catches PySpark performance issues before they hit production. It detects **30+ anti-patterns** locally in real time and runs **safe dry-run analysis** on a Databricks cluster or serverless compute to inspect Catalyst execution plans — all without executing Spark jobs or touching your data.
 
 > **Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=CatalystOps.catalystops)**
 
@@ -13,7 +13,7 @@ PySpark makes it easy to write code that *works* but runs slowly or expensively 
 CatalystOps gives you **two layers of analysis**:
 
 - **Instant local checks** as you type — no cluster required
-- **Deep plan analysis** on your actual Databricks cluster, parsing Catalyst physical and logical plans to catch issues that only appear at runtime
+- **Deep plan analysis** on your actual Databricks cluster or serverless compute, parsing Catalyst physical and logical plans to catch issues that only appear at runtime
 
 ---
 
@@ -26,23 +26,42 @@ Detects anti-patterns instantly via regex-based pattern matching with full comme
 | Severity | Checks |
 |----------|--------|
 | **Critical** | `collect()`, `crossJoin()`, SQL injection via f-strings in `spark.sql()` |
-| **Warning** | UDFs, `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `withColumn` in loops, non-deterministic UDFs in UDFs, deprecated pandas `.append()`, `.rdd` conversion, unnecessary `count()`, `checkpoint()` (triggers HDFS write) |
+| **Warning** | UDFs, `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `dropDuplicates` on streaming DataFrame (cross-batch stateful dedup), `withColumn` in loops, non-deterministic UDFs in UDFs, deprecated pandas `.append()`, `.rdd` conversion, unnecessary `count()`, `checkpoint()` (triggers HDFS write) |
 | **Info** | Schema inference, chained `.filter()`, `show()` in production, `display()` in production, `cache()` without `unpersist()`, `select("*")`, global `orderBy`, missing write mode, `pandas_udf`, `to_pandas_on_spark()`, `Cross Join`, `Join Without broadcast()`, `Table May Lack Statistics` |
 
 Each issue shows a **one-line explanation** and a **quick fix code block** on hover.
+
+#### Streaming Dedup Detection
+
+When your file uses `readStream`, CatalystOps flags all `dropDuplicates()` calls with a streaming-specific warning:
+
+> **`dropDuplicates` on Streaming DataFrame (Cross-Batch Stateful Dedup)** — `dropDuplicates` on a streaming DataFrame creates a `StreamingDeduplicate` node (visible in the Catalyst plan as step `(13) StreamingDeduplicate`). This maintains state **across all micro-batches** — each key is emitted only the first time it is seen, and every subsequent update is silently dropped forever. This is rarely the intended behavior for update or change-data streams.
 
 ---
 
 ### Cluster Analysis — Catalyst Plan Inspection (Databricks Dry Run)
 
-When a Databricks connection is configured, CatalystOps submits a neutralized version of your script to the cluster and parses both the **physical** and **analyzed logical** execution plans.
+When a Databricks connection is configured, CatalystOps submits a neutralized version of your script to the cluster or serverless compute and parses both the **physical** and **analyzed logical** execution plans.
 
 #### How it works — safely
 
-1. **Safety wrapping** — writes, collects, and action calls are neutralized so no data is modified or moved
-2. **Local file bundling** — imported local `.py` files are detected and inlined automatically
-3. **Plan capture** — `explain("formatted")` and the analyzed logical plan are retrieved for every DataFrame
+1. **Safety wrapping** — writes, collects, streaming actions, and all action calls are neutralized so no data is modified or moved
+2. **Plan capture** — a `_catalystops_capture(df)` call is injected in place of each action. This function captures the DataFrame's `explain("formatted")` output using stdout redirection, and works with streaming DataFrames and DataFrames defined inside functions
+3. **Local file bundling** — imported local `.py` files are detected and inlined automatically
 4. **Plan parsing** — physical and logical plans are analyzed for expensive patterns
+
+#### Neutralized actions
+
+| Original | Replacement |
+|----------|-------------|
+| `df.collect()` | `_catalystops_capture(df)` |
+| `df.count()` | `_catalystops_capture(df)` |
+| `df.show()` | `_catalystops_capture(df)` |
+| `df.toPandas()` | `_catalystops_capture(df)` |
+| `df.write.mode(...).save(...)` | `_catalystops_capture(df)` |
+| `df.writeStream....start()` | `_catalystops_capture(df)` (full chain dropped) |
+| `display(df)` | `_catalystops_capture(df)` |
+| `query.awaitTermination()` | `# [CatalystOps: neutralized]` |
 
 #### Join Detection
 
@@ -116,7 +135,9 @@ Local analysis works immediately after install — no configuration needed.
 
 ### Configure Databricks Connection (for dry-run plan analysis)
 
-Run **CatalystOps: Configure Databricks Connection** from the Command Palette (`⌘⇧P`), or add to your `settings.json`:
+Run **CatalystOps: Configure Databricks Connection** from the Command Palette (`⌘⇧P`).
+
+#### Option A — Interactive cluster
 
 ```jsonc
 {
@@ -126,7 +147,18 @@ Run **CatalystOps: Configure Databricks Connection** from the Command Palette (`
 }
 ```
 
-You can also point to a Databricks CLI config file:
+#### Option B — Serverless compute (no cluster needed)
+
+Leave **Cluster ID blank** in the configuration wizard — CatalystOps automatically switches to serverless mode. Requires a Databricks Premium workspace.
+
+```jsonc
+{
+  "catalystops.databricks.host": "https://myworkspace.cloud.databricks.com",
+  "catalystops.databricks.executionMode": "serverless"
+}
+```
+
+#### Option C — Databricks CLI config file
 
 ```jsonc
 {
@@ -145,7 +177,8 @@ You can also point to a Databricks CLI config file:
 | **CatalystOps: Analyze Selected Code** | — | Analyze only the highlighted selection |
 | **CatalystOps: Show Report** | — | Open a shareable HTML report of the last analysis |
 | **CatalystOps: Configure Databricks Connection** | — | Interactive connection setup wizard |
-| **CatalystOps: Show Generated Script** | — | View the neutralized Python script sent to the cluster |
+| **CatalystOps: Show Generated Script** | — | View the full neutralized script sent to the cluster |
+| **CatalystOps: Preview Dry-Run Script** | — | Preview only the neutralized user code (before submission) |
 
 ### Typical Workflow
 
@@ -163,20 +196,27 @@ You can also point to a Databricks CLI config file:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `catalystops.databricks.host` | `""` | Databricks workspace URL |
-| `catalystops.databricks.token` | `""` | Personal access token |
-| `catalystops.databricks.clusterId` | `""` | Interactive cluster ID for dry runs |
+| `catalystops.databricks.token` | `""` | Personal access token (leave blank to use `.databrickscfg`) |
+| `catalystops.databricks.clusterId` | `""` | Interactive cluster ID (leave blank to use serverless) |
 | `catalystops.databricks.configPath` | `~/.databrickscfg` | Path to Databricks CLI config file |
 | `catalystops.databricks.profile` | `DEFAULT` | Config profile name |
+| `catalystops.databricks.executionMode` | `cluster` | `cluster` or `serverless` — auto-set to `serverless` when cluster ID is blank |
 | `catalystops.analysis.autoAnalyzeOnSave` | `false` | Auto-analyze on save |
 | `catalystops.analysis.enableLocalCodeAnalysis` | `true` | Enable local anti-pattern detection |
 | `catalystops.cost.dbuRatePerHour` | `0.4` | DBU rate ($/hr) for cost estimation |
-| `catalystops.debug` | `false` | Log equivalent curl commands for every Databricks API call |
+| `catalystops.debug` | `false` | Log equivalent curl commands and diagnostic details to the Output panel |
 
 ---
 
 ## Safety Model
 
-The dry-run analysis **never executes Spark jobs or modifies data**. Before submission, the safety wrapper replaces all action operations — `.write`, `.collect()`, `.count()`, `.show()`, `.toPandas()`, `.save()`, etc. — with `.explain("formatted")` so only Catalyst plan metadata is retrieved from the cluster.
+The dry-run analysis **never executes Spark jobs or modifies data**. Before submission, the safety wrapper:
+
+1. Replaces all action operations with `_catalystops_capture(df)` — a function injected into the script's namespace that captures the Catalyst plan without triggering execution
+2. Drops multi-line streaming chains (`.writeStream...foreachBatch(...)...start()`) in full
+3. Comments out lifecycle calls like `awaitTermination()` that would block execution
+
+`_catalystops_capture(df)` captures the plan by temporarily redirecting stdout during `df.explain("formatted")`. This approach works on Databricks Runtime subclasses of DataFrame and on streaming DataFrames.
 
 Local `.py` files imported by your script are automatically detected and bundled inline — no need to manually package dependencies.
 
@@ -191,14 +231,14 @@ Local `.py` files imported by your script are automatically detected and bundled
 └─────────────────┘     └──────────────────────┘
         │
         ▼  (if Databricks configured)
-┌──────────────────┐     ┌──────────────────┐     ┌──────────────┐
-│  Safety Wrapper   │────▶│  Cluster Script   │────▶│  Databricks   │
-│  neutralize       │     │  + local file     │     │  Command API  │
-│  writes/actions   │     │  bundling         │     │  (dry run)    │
-└──────────────────┘     └──────────────────┘     └──────┬───────┘
-                                                         │
-                    ┌────────────────────┐               │
-                    │  Plan Parser       │◀──────────────┘
+┌──────────────────┐     ┌──────────────────┐     ┌──────────────────────┐
+│  Safety Wrapper   │────▶│  Cluster Script   │────▶│  Databricks           │
+│  neutralize       │     │  + local file     │     │  Jobs API (dry run)   │
+│  writes/actions   │     │  bundling         │     │  cluster or serverless│
+└──────────────────┘     └──────────────────┘     └──────────┬───────────┘
+                                                             │
+                    ┌────────────────────┐                   │
+                    │  Plan Parser       │◀──────────────────┘
                     │  Physical plan     │  joins, shuffles, cache,
                     │  Logical plan      │  repeated scans, spills
                     └────────┬───────────┘
@@ -249,6 +289,8 @@ Press `F5` in VS Code to launch an Extension Development Host with breakpoint su
 catalyst-ops/
 ├── vscode/
 │   ├── extension.ts              # Activation, command registration, local analysis loop
+│   ├── telemetry.ts              # Azure Application Insights telemetry wrapper
+│   ├── logger.ts                 # Output channel logger (debug-gated for diagnostics)
 │   ├── analysis/
 │   │   ├── codeAnalyzer.ts       # 30+ anti-pattern definitions + regex scanner
 │   │   ├── planParser.ts         # Catalyst plan → join/shuffle/cache/scan issues

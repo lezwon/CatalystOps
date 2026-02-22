@@ -274,14 +274,16 @@ export async function analyzeCost(
         log('Parsing results...');
         const parsed = extractResult(output);
 
-        // Collect execution warnings (partial failures like undefined functions)
+        // Collect execution errors/warnings (partial failures, diagnostics entries)
         const execErrors = parsed?.errors ?? [];
-        const execWarning = execErrors.length > 0
-            ? execErrors.map((e: any) => e.error || e.traceback || JSON.stringify(e)).join('; ')
-            : '';
-
-        if (execErrors.length > 0) {
-            logError(`Execution warnings: ${execWarning}`);
+        // Diagnostics entries (phase === 'diagnostics') go to debug output only
+        const diagEntries = execErrors.filter((e: any) => e.phase === 'diagnostics');
+        const actualErrors = execErrors.filter((e: any) => e.phase !== 'diagnostics');
+        for (const d of diagEntries) {
+            logDebug(`Diagnostics: ${JSON.stringify(d)}`);
+        }
+        for (const e of actualErrors as any[]) {
+            logError(`Execution error: ${e.error || e.traceback || JSON.stringify(e)}`);
         }
 
         if (!parsed || parsed.results.length === 0) {
@@ -290,9 +292,10 @@ export async function analyzeCost(
             issuesTreeProvider.updateFromCodeIssues(localIssues);
             updateStatusBar(localIssues);
             log('No DataFrames found in output');
-            if (execWarning) {
-                vscode.window.showErrorMessage(`CatalystOps: No DataFrames found. Execution error: ${execWarning}`);
-            }
+            const nodfMsg = actualErrors.length > 0
+                ? 'CatalystOps: No DataFrames found. Check the Output panel for details.'
+                : 'CatalystOps: No DataFrames found in script output.';
+            vscode.window.showErrorMessage(nodfMsg);
             setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
             return;
         }
@@ -355,10 +358,7 @@ export async function analyzeCost(
             dryRunIssueCount: String(dryRunCount),
         });
 
-        let msg = `CatalystOps: Analysis complete. ${totalIssues} issues found (${localIssues.length} local, ${dryRunCount} from dry run). Estimated cost: ${runCost.formatted}.`;
-        if (execWarning) {
-            msg += ` Warning: ${execWarning}`;
-        }
+        const msg = `CatalystOps: Analysis complete. ${totalIssues} issues found (${localIssues.length} local, ${dryRunCount} from dry run). Estimated cost: ${runCost.formatted}.`;
         vscode.window.showInformationMessage(msg);
         setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
     } catch (err: unknown) {

@@ -533,6 +533,48 @@ export function analyzeCode(code: string): CodeIssue[] {
         }
     }
 
+    // Extra pass: flag dropDuplicates on streaming DataFrames (cross-batch stateful dedup).
+    // Only triggered when the file contains readStream, since static analysis cannot
+    // track variable types. Flags all dropDuplicates calls (with or without a subset)
+    // because both create a StreamingDeduplicate node that silently drops updates.
+    if (/\breadStream\b/.test(code)) {
+        const streamDedupRe = /\.dropDuplicates\s*\(/g;
+        streamDedupRe.lastIndex = 0;
+        let sdm: RegExpExecArray | null;
+        while ((sdm = streamDedupRe.exec(code)) !== null) {
+            const offset = sdm.index;
+            const lineNum = code.substring(0, offset).split('\n').length - 1;
+            const lineStart = code.lastIndexOf('\n', offset - 1) + 1;
+            const column = offset - lineStart;
+            if (isInsideComment(lines[lineNum], column)) { continue; }
+            issues.push({
+                id: 'CODE_STREAM_DEDUP_001',
+                severity: Severity.INFO,
+                category: IssueCategory.CODE,
+                title: 'dropDuplicates on Streaming DataFrame (Cross-Batch Stateful Dedup)',
+                description: 'dropDuplicates on a streaming DataFrame creates a StreamingDeduplicate node that maintains state across ALL micro-batches. Each key is emitted only the first time it is seen — subsequent updates for the same key are silently dropped forever. This is rarely the intended behavior for update or change-data streams.',
+                fix: {
+                    description: 'Move deduplication inside foreachBatch for per-batch dedup, or use a watermark for time-bounded dedup',
+                    code: `# Per-batch dedup inside foreachBatch:
+def process_batch(batch_df, batch_id):
+    batch_df.dropDuplicates(["id"]).write.mode("append").saveAsTable("t")
+
+streaming_df.writeStream.foreachBatch(process_batch).start()
+
+# Time-bounded dedup with watermark (state expires):
+streaming_df \\
+    .withWatermark("event_time", "1 hour") \\
+    .dropDuplicates(["id", "event_time"])`,
+                },
+                line: lineNum,
+                column,
+                endLine: lineNum,
+                endColumn: column + sdm[0].length,
+                location: `Line ${lineNum + 1}`,
+            });
+        }
+    }
+
     return issues;
 }
 

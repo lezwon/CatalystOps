@@ -140,6 +140,16 @@ const ISSUE_INFO: Record<string, FixEntry> = {
         detail: 'Without a subset, dropDuplicates() compares ALL columns, which is expensive.',
         fix: 'df.dropDuplicates(["id", "timestamp"])  # specify key columns',
     },
+    'dropDuplicates on Streaming DataFrame (Cross-Batch Stateful Dedup)': {
+        detail: 'Spark creates a `StreamingDeduplicate` node that remembers every key it has ever seen across all micro-batches (stored in checkpoint state). Any row whose key was already seen in a previous batch is silently dropped — it never reaches your sink.',
+        fix: `# Per-batch dedup (no cross-batch state):
+def process_batch(batch_df, batch_id):
+    batch_df.dropDuplicates(["id"]).write.mode("append").saveAsTable("t")
+streaming_df.writeStream.foreachBatch(process_batch).start()
+
+# Time-bounded dedup (state expires):
+streaming_df.withWatermark("event_time", "1 hour").dropDuplicates(["id", "event_time"])`,
+    },
     'display() in Production Code': {
         detail: 'display() is a notebook function that triggers computation. Remove from production pipelines.',
         fix: 'df.write.parquet("output_path")  # write instead of display',
