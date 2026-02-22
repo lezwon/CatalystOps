@@ -140,13 +140,13 @@ function tryReplaceWithExplain(line: string): string | undefined {
     const trimmed = line.trim();
     const indent = line.substring(0, line.length - line.trimStart().length);
 
-    // display(df) → df.explain("formatted")
+    // display(df) → _catalystops_capture(df)
     const displayMatch = DISPLAY_RE.exec(trimmed);
     if (displayMatch !== null) {
         const afterOpen = trimmed.indexOf('(', displayMatch.index) + 1;
         const arg = extractFirstArg(trimmed.substring(afterOpen));
         if (arg) {
-            return `${indent}${arg}.explain("formatted")`;
+            return `${indent}_catalystops_capture(${arg})`;
         }
     }
 
@@ -158,16 +158,16 @@ function tryReplaceWithExplain(line: string): string | undefined {
         let dfExpr = trimmed.substring(0, m.index).trim();
         if (!dfExpr) {
             // Method starts the line — this is a continuation line (e.g. "    .write").
-            // We can't build an explain from this line alone.
+            // We can't build a capture call from this line alone.
             return undefined;
         }
         // Strip outer f-string context if the dangerous call is inside an interpolation,
-        // e.g. print(f"Total rows: {df_spark.count()}") → df_spark.explain("formatted")
+        // e.g. print(f"Total rows: {df_spark.count()}") → _catalystops_capture(df_spark)
         dfExpr = stripFStringPrefix(dfExpr);
         if (!dfExpr) {
             return undefined;
         }
-        return `${indent}${dfExpr}.explain("formatted")`;
+        return `${indent}_catalystops_capture(${dfExpr})`;
     }
 
     return undefined;

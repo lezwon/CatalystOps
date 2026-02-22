@@ -310,6 +310,32 @@ def _catalystops_get_logical_plan(df):
     except Exception:
         return ""
 
+# _catalystops_capture is injected into the exec namespace so that neutralized
+# user code can call it directly instead of df.explain("formatted").
+# This avoids monkey-patching DataFrame, which doesn't work reliably on
+# Databricks Runtime because the runtime uses a subclass with its own explain.
+import io as _catalystops_io
+import contextlib as _catalystops_ctx
+from pyspark.sql import DataFrame as _DataFrame
+_catalystops_intercepted = []  # list of {'df': df, 'plan': plan_text}
+
+def _catalystops_capture(df):
+    """Called by neutralized writeStream/write/collect/etc. lines."""
+    try:
+        _buf = _catalystops_io.StringIO()
+        with _catalystops_ctx.redirect_stdout(_buf):
+            df.explain("formatted")
+        _plan = _buf.getvalue()
+        if not _plan.strip():
+            _plan = _catalystops_get_plan(df)
+    except Exception:
+        try:
+            _plan = _catalystops_get_plan(df)
+        except Exception:
+            _plan = ''
+    _catalystops_intercepted.append({'df': df, 'plan': _plan})
+    return None  # mimic writeStream.start() / collect() return value
+
 # Execute neutralized user code (with imported project files inlined above)
 # Use a single namespace seeded with globals() so that imports made inside
 # exec (e.g. from pyspark.sql.types import StructType) are visible to
@@ -325,13 +351,31 @@ except Exception as _e:
         "traceback": traceback.format_exc(),
     })
 
-# Discover DataFrame variables (even if exec partially failed)
-from pyspark.sql import DataFrame
+# Build a lookup of pre-captured plan text keyed by DataFrame id.
+# These plans were captured by redirecting stdout during .explain("formatted"),
+# so they work for both static and streaming DataFrames.
+_catalystops_plan_by_id = {id(e['df']): e['plan'] for e in _catalystops_intercepted}
+
+# Discover DataFrames: namespace scan first, then anything captured via the
+# explain hook (covers DataFrames created inside functions).
 _catalystops_dfs = {}
 
 for _name, _val in _catalystops_user_ns.items():
-    if isinstance(_val, DataFrame) and not _name.startswith('_'):
+    if isinstance(_val, _DataFrame) and not _name.startswith('_'):
         _catalystops_dfs[_name] = _val
+
+_catalystops_seen_ids = {id(_v) for _v in _catalystops_dfs.values()}
+for _i, _entry in enumerate(_catalystops_intercepted):
+    _captured_df = _entry['df']
+    if id(_captured_df) not in _catalystops_seen_ids:
+        # Try to match back to a variable name in the namespace
+        _captured_name = next(
+            (_n for _n, _v in _catalystops_user_ns.items()
+             if _v is _captured_df and not _n.startswith('_')),
+            f'dataframe_{_i + 1}',
+        )
+        _catalystops_dfs[_captured_name] = _captured_df
+        _catalystops_seen_ids.add(id(_captured_df))
 
 # Collect cluster info once
 _cluster_info = _catalystops_get_cluster_info()
@@ -340,8 +384,25 @@ _cluster_info = _catalystops_get_cluster_info()
 for _df_name, _df in _catalystops_dfs.items():
     try:
         _plan_start = _time.time()
-        _plan = _catalystops_get_plan(_df)
-        _plan_duration_ms = int((_time.time() - _plan_start) * 1000)
+        _pre_plan = _catalystops_plan_by_id.get(id(_df))
+        if _pre_plan is not None:
+            # Use the plan text captured during .explain("formatted") — works
+            # for streaming DataFrames without re-triggering query execution.
+            _plan = _pre_plan
+            _logical = ''
+            _plan_duration_ms = 0
+        else:
+            _plan = _catalystops_get_plan(_df)
+            _logical = _catalystops_get_logical_plan(_df)
+            _plan_duration_ms = int((_time.time() - _plan_start) * 1000)
+        try:
+            _col_count = len(_df.columns)
+        except Exception:
+            _col_count = 0
+        try:
+            _parallelism = _df.sparkSession.sparkContext.defaultParallelism
+        except Exception:
+            _parallelism = 0
         _catalystops_results.append({
             "analysisTime": datetime.now().isoformat(),
             "planDurationMs": _plan_duration_ms,
@@ -350,7 +411,7 @@ for _df_name, _df in _catalystops_dfs.items():
             "cluster": _cluster_info,
             "executionPlan": {
                 "physicalPlan": _plan,
-                "logicalPlan": _catalystops_get_logical_plan(_df),
+                "logicalPlan": _logical,
                 "operators": [],
                 "totalStages": 0,
                 "totalShuffles": 0,
@@ -358,8 +419,8 @@ for _df_name, _df in _catalystops_dfs.items():
                 "aggregationCount": 0,
             },
             "dataStats": {
-                "partitionCount": _df.sparkSession.sparkContext.defaultParallelism,
-                "columnCount": len(_df.columns),
+                "partitionCount": _parallelism,
+                "columnCount": _col_count,
                 "hasNestedTypes": False,
                 "nullPercentages": {},
                 "partitionSizes": [],
@@ -372,6 +433,14 @@ for _df_name, _df in _catalystops_dfs.items():
             "dataframe": _df_name,
             "error": str(_e),
         })
+
+# Diagnostic entry — always emitted, helps debug when results are empty
+_catalystops_errors.append({
+    "phase": "diagnostics",
+    "intercepted_count": len(_catalystops_intercepted),
+    "dfs_found": list(_catalystops_dfs.keys()),
+    "capture_fn_available": '_catalystops_capture' in _catalystops_user_ns,
+})
 
 # Output results between sentinel markers
 _output = json.dumps({
