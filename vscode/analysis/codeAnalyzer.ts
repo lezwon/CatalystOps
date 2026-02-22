@@ -513,9 +513,10 @@ export function analyzeCode(code: string): CodeIssue[] {
             const lineStart = code.lastIndexOf('\n', offset - 1) + 1;
             const column = offset - lineStart;
 
-            // Skip matches inside comments (full-line or inline)
+            // Skip matches inside comments or suppressed with # noqa: catalystops
             const lineText = lines[lineNum];
             if (isInsideComment(lineText, column)) { continue; }
+            if (/# noqa: catalystops\b/i.test(lineText)) { continue; }
 
             issues.push({
                 id: pattern.id,
@@ -547,6 +548,7 @@ export function analyzeCode(code: string): CodeIssue[] {
             const lineStart = code.lastIndexOf('\n', offset - 1) + 1;
             const column = offset - lineStart;
             if (isInsideComment(lines[lineNum], column)) { continue; }
+            if (/# noqa: catalystops\b/i.test(lines[lineNum])) { continue; }
             issues.push({
                 id: 'CODE_STREAM_DEDUP_001',
                 severity: Severity.INFO,

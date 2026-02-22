@@ -174,6 +174,19 @@ function getQuickFixes(
         }
     }
 
+    // Always offer a suppress action for every CatalystOps diagnostic
+    const suppressEdit = new vscode.WorkspaceEdit();
+    suppressEdit.insert(
+        document.uri,
+        document.lineAt(range.start.line).range.end,
+        '  # noqa: catalystops',
+    );
+    fixes.push({
+        title: 'Suppress: add # noqa: catalystops',
+        edit: suppressEdit,
+        isPreferred: false,
+    });
+
     return fixes;
 }
 
