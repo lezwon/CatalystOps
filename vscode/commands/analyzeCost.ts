@@ -9,6 +9,14 @@ import * as fs from 'fs';
 import { getConnectionConfig } from '../config/settings';
 import { ensureClusterRunning } from '../databricks/clusterManager';
 import { executeCommand } from '../databricks/commandExecution';
+import {
+    checkServerlessAvailability,
+    uploadScriptToDbfs,
+    deleteDbfsFile,
+    submitServerlessRun,
+    pollJobRun,
+    getJobRunOutput,
+} from '../databricks/serverlessExecution';
 import { generateClusterScript, extractResult } from '../analysis/clusterScript';
 import { analyzeCode } from '../analysis/codeAnalyzer';
 import { parsePlanFromResults } from '../analysis/planParser';
@@ -112,30 +120,6 @@ export async function analyzeCost(
     setAnalyzing();
 
     try {
-        log(`Checking cluster state (${config.clusterId})...`);
-        addStep('Checking cluster', 'running');
-        const running = await ensureClusterRunning(config.host, config.token, config.clusterId);
-        if (!running) {
-            finishStep('error', 'not ready');
-            log('Cluster not ready — aborting cluster analysis');
-            setCodeIssueDiagnostics(editor.document.uri, localIssues);
-            issuesTreeProvider.updateFromCodeIssues(localIssues);
-            updateStatusBar(localIssues);
-            setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
-            return;
-        }
-        log('Cluster is running');
-        finishStep('done');
-
-        addStep('Generating script', 'running');
-        const sourceDir = path.dirname(editor.document.uri.fsPath);
-        const { script, processedUserCode } = generateClusterScript(code, sourceDir);
-        lastProcessedUserCode = processedUserCode;
-        log(`Script generated (${script.length} chars)`);
-        finishStep('done', `${(script.length / 1024).toFixed(1)} KB`);
-
-        addStep('Running on cluster', 'running');
-        log('Submitting script to cluster...');
         const onPollProgress = (elapsedMs: number) => {
             const secs = Math.floor(elapsedMs / 1000);
             if (steps.length > 0) {
@@ -144,26 +128,125 @@ export async function analyzeCost(
                 issuesTreeProvider.setProgress([...steps]);
             }
         };
-        const result = await executeCommand(config.host, config.token, config.clusterId, script, onPollProgress);
 
-        if (result.status === 'Error' || result.results?.resultType === 'error') {
-            finishStep('error');
-            const errorMsg = result.results?.cause || result.results?.data || 'Unknown error';
-            logError(`Cluster execution failed: ${errorMsg}`);
-            setError(errorMsg.substring(0, 100));
-            vscode.window.showErrorMessage(`CatalystOps cluster analysis failed: ${errorMsg}`);
-            setCodeIssueDiagnostics(editor.document.uri, localIssues);
-            issuesTreeProvider.updateFromCodeIssues(localIssues);
-            setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
-            return;
+        let output: string;
+
+        if (config.executionMode === 'serverless') {
+            // --- Serverless path ---
+            log('Execution mode: serverless');
+
+            addStep('Checking serverless', 'running');
+            const availability = await checkServerlessAvailability(config.host, config.token);
+            if (!availability.available) {
+                finishStep('error', availability.reason);
+                log(`Serverless not available: ${availability.reason}`);
+                vscode.window.showErrorMessage(
+                    `CatalystOps: ${availability.reason ?? 'Serverless compute not available on this workspace. Databricks Premium tier is required.'}`,
+                );
+                setCodeIssueDiagnostics(editor.document.uri, localIssues);
+                issuesTreeProvider.updateFromCodeIssues(localIssues);
+                updateStatusBar(localIssues);
+                setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
+                return;
+            }
+            finishStep('done', 'serverless available');
+
+            addStep('Generating script', 'running');
+            const sourceDir = path.dirname(editor.document.uri.fsPath);
+            const { script, processedUserCode } = generateClusterScript(code, sourceDir);
+            lastProcessedUserCode = processedUserCode;
+            log(`Script generated (${script.length} chars)`);
+            finishStep('done', `${(script.length / 1024).toFixed(1)} KB`);
+
+            addStep('Uploading script', 'running');
+            log('Uploading script to DBFS...');
+            const dbfsPath = await uploadScriptToDbfs(config.host, config.token, script);
+            log(`Script uploaded to ${dbfsPath}`);
+            finishStep('done', dbfsPath);
+
+            addStep('Running on serverless', 'running');
+            log('Submitting serverless run...');
+            const runId = await submitServerlessRun(config.host, config.token, dbfsPath);
+            log(`Serverless run submitted: run_id=${runId}`);
+            const runOutcome = await pollJobRun(config.host, config.token, runId, onPollProgress);
+
+            if (runOutcome === 'TIMEOUT') {
+                finishStep('error', 'timed out');
+                logError('Serverless job run timed out');
+                setError('Serverless job run timed out');
+                vscode.window.showErrorMessage('CatalystOps: Serverless job run timed out.');
+                setCodeIssueDiagnostics(editor.document.uri, localIssues);
+                issuesTreeProvider.updateFromCodeIssues(localIssues);
+                setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
+                return;
+            }
+
+            if (runOutcome === 'FAILED') {
+                finishStep('error', 'run failed');
+                logError('Serverless job run failed');
+                setError('Serverless job run failed');
+                vscode.window.showErrorMessage('CatalystOps: Serverless job run failed. Check the Databricks Jobs UI for details.');
+                setCodeIssueDiagnostics(editor.document.uri, localIssues);
+                issuesTreeProvider.updateFromCodeIssues(localIssues);
+                setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
+                return;
+            }
+            finishStep('done');
+
+            addStep('Fetching output', 'running');
+            log(`Fetching output for run_id=${runId}...`);
+            output = await getJobRunOutput(config.host, config.token, runId);
+            lastRawOutput = output;
+            await deleteDbfsFile(config.host, config.token, dbfsPath);
+            finishStep('done');
+        } else {
+            // --- Cluster path ---
+            log(`Checking cluster state (${config.clusterId})...`);
+            addStep('Checking cluster', 'running');
+            const running = await ensureClusterRunning(config.host, config.token, config.clusterId!);
+            if (!running) {
+                finishStep('error', 'not ready');
+                log('Cluster not ready — aborting cluster analysis');
+                setCodeIssueDiagnostics(editor.document.uri, localIssues);
+                issuesTreeProvider.updateFromCodeIssues(localIssues);
+                updateStatusBar(localIssues);
+                setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
+                return;
+            }
+            log('Cluster is running');
+            finishStep('done');
+
+            addStep('Generating script', 'running');
+            const sourceDir = path.dirname(editor.document.uri.fsPath);
+            const { script, processedUserCode } = generateClusterScript(code, sourceDir);
+            lastProcessedUserCode = processedUserCode;
+            log(`Script generated (${script.length} chars)`);
+            finishStep('done', `${(script.length / 1024).toFixed(1)} KB`);
+
+            addStep('Running on cluster', 'running');
+            log('Submitting script to cluster...');
+            const result = await executeCommand(config.host, config.token, config.clusterId!, script, onPollProgress);
+
+            if (result.status === 'Error' || result.results?.resultType === 'error') {
+                finishStep('error');
+                const errorMsg = result.results?.cause || result.results?.data || 'Unknown error';
+                logError(`Cluster execution failed: ${errorMsg}`);
+                setError(errorMsg.substring(0, 100));
+                vscode.window.showErrorMessage(`CatalystOps cluster analysis failed: ${errorMsg}`);
+                setCodeIssueDiagnostics(editor.document.uri, localIssues);
+                issuesTreeProvider.updateFromCodeIssues(localIssues);
+                setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
+                return;
+            }
+            finishStep('done');
+
+            output = result.results?.data || '';
+            lastRawOutput = output;
         }
-        finishStep('done');
 
-        // Parse cluster results
+        // Parse results (common to both paths)
         addStep('Parsing results', 'running');
-        log('Parsing cluster results...');
-        const output = result.results?.data || '';
-        lastRawOutput = output;
+        log('Parsing results...');
         const parsed = extractResult(output);
 
         // Collect execution warnings (partial failures like undefined functions)
@@ -181,7 +264,7 @@ export async function analyzeCost(
             setCodeIssueDiagnostics(editor.document.uri, localIssues);
             issuesTreeProvider.updateFromCodeIssues(localIssues);
             updateStatusBar(localIssues);
-            log('No DataFrames found in cluster output');
+            log('No DataFrames found in output');
             if (execWarning) {
                 vscode.window.showErrorMessage(`CatalystOps: No DataFrames found. Execution error: ${execWarning}`);
             }

@@ -102,6 +102,12 @@
           "default": 0.4,
           "description": "DBU rate per hour for cost estimation (dollars)"
         },
+        "catalystops.databricks.executionMode": {
+          "type": "string",
+          "enum": ["cluster", "serverless"],
+          "default": "cluster",
+          "description": "Execution mode for dry-run analysis. 'cluster' uses an interactive cluster (requires clusterId). 'serverless' uses Databricks Serverless Compute (requires Premium tier, no clusterId needed)."
+        },
         "catalystops.debug": {
           "type": "boolean",
           "default": false,
