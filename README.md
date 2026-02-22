@@ -6,6 +6,8 @@
 
 ---
 
+![CatalystOps Demo](https://raw.githubusercontent.com/lezwon/CatalystOps/main/media/demo.gif)
+
 ## Why CatalystOps?
 
 PySpark makes it easy to write code that *works* but runs slowly or expensively at scale. Common pitfalls — `collect()` on large DataFrames, cartesian joins, missing broadcast hints, repeated table scans, and cache misconfigurations — often slip past code review and only surface as runaway cluster bills.
