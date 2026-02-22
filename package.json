@@ -25,7 +25,8 @@
     "catalyst"
   ],
   "activationEvents": [
-    "onLanguage:python"
+    "onLanguage:python",
+    "onView:catalystops.issuesTree"
   ],
   "main": "./out/vscode/extension.js",
   "contributes": {
