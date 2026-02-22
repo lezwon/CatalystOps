@@ -10,6 +10,7 @@ import { createDiagnosticCollection, setCodeIssueDiagnostics, clearDiagnostics }
 import { createStatusBar, setIdle, setAnalyzing, setResults, setError } from './views/statusBar';
 import { analyzeCost, showGeneratedScript } from './commands/analyzeCost';
 import { initOutputChannel } from './logger';
+import { initTelemetry, sendEvent } from './telemetry';
 import { analyzeSelection } from './commands/analyzeSelection';
 import { showReport } from './commands/showReport';
 import { configureConnection } from './commands/configureConnection';
@@ -21,6 +22,8 @@ import { Severity } from './models/types';
 
 export function activate(context: vscode.ExtensionContext): void {
     initOutputChannel(context);
+    initTelemetry(context);
+    sendEvent('extension/activated');
 
     const diagnostics = createDiagnosticCollection();
     const statusBar = createStatusBar();

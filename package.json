@@ -134,6 +134,9 @@
       ]
     }
   },
+  "dependencies": {
+    "@vscode/extension-telemetry": "^0.9.8"
+  },
   "scripts": {
     "vscode:prepublish": "npm run build",
     "compile": "tsc -p ./",

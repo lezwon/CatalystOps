@@ -28,6 +28,7 @@ import { setAnalyzing, setResults, setError, setIdle } from '../views/statusBar'
 import { IssuesTreeDataProvider, ProgressStep, ProgressStepStatus } from '../views/issuesTreeView';
 import { AnalysisResult, CodeIssue, Severity } from '../models/types';
 import { log, logDebug, logError, showOutput } from '../logger';
+import { sendEvent } from '../telemetry';
 
 /** Store the last analysis result for report generation */
 let lastAnalysisResult: AnalysisResult[] | undefined;
@@ -62,6 +63,8 @@ export async function analyzeCost(
     context: vscode.ExtensionContext,
     issuesTreeProvider: IssuesTreeDataProvider,
 ): Promise<void> {
+    sendEvent('command/analyze_cost');
+
     const editor = vscode.window.activeTextEditor;
     if (!editor || editor.document.languageId !== 'python') {
         vscode.window.showWarningMessage('CatalystOps: Open a Python file to analyze.');
@@ -322,6 +325,14 @@ export async function analyzeCost(
         const dryRunCount = clusterDiagnostics.length + planDiagnostics.length;
         log(`Analysis complete: ${totalIssues} total issue(s) (${localIssues.length} local, ${dryRunCount} from dry run)`);
 
+        sendEvent('analysis/complete', {
+            executionMode: config.executionMode,
+            dataframeCount: String(analysisResults.length),
+            issueCount: String(totalIssues),
+            localIssueCount: String(localIssues.length),
+            dryRunIssueCount: String(dryRunCount),
+        });
+
         let msg = `CatalystOps: Analysis complete. ${totalIssues} issues found (${localIssues.length} local, ${dryRunCount} from dry run). Estimated cost: ${runCost.formatted}.`;
         if (execWarning) {
             msg += ` Warning: ${execWarning}`;
@@ -332,6 +343,9 @@ export async function analyzeCost(
         const message = err instanceof Error ? err.message : String(err);
         logError(message);
         setError(message.substring(0, 100));
+        sendEvent('analysis/failed', {
+            executionMode: config?.executionMode ?? 'unknown',
+        });
         vscode.window.showErrorMessage(`CatalystOps: ${message}`);
 
         // Mark the last running step as failed
