@@ -9,7 +9,10 @@ node_modules/**
 .gitignore
 tsconfig.json
 esbuild.js
+demo.py
+*.vsix
 **/*.map
 **/*.ts
-!out/**
+out/**
+!out/vscode/extension.js
 !media/**
