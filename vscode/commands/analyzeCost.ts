@@ -59,6 +59,28 @@ export async function showGeneratedScript(): Promise<void> {
     await vscode.window.showTextDocument(doc, { preview: true });
 }
 
+/**
+ * Generate and preview the full script that would be sent to Databricks,
+ * without executing it. Useful for inspecting neutralization and bundling
+ * before committing to a dry run.
+ */
+export async function previewDryRunScript(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== 'python') {
+        vscode.window.showWarningMessage('CatalystOps: Open a Python file to preview the script.');
+        return;
+    }
+
+    const code = editor.document.getText();
+    const sourceDir = path.dirname(editor.document.uri.fsPath);
+    const { processedUserCode } = generateClusterScript(code, sourceDir);
+
+    const tmpPath = path.join(os.tmpdir(), 'catalystops_dryrun_preview.py');
+    fs.writeFileSync(tmpPath, processedUserCode, 'utf-8');
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(tmpPath));
+    await vscode.window.showTextDocument(doc, { preview: true });
+}
+
 export async function analyzeCost(
     context: vscode.ExtensionContext,
     issuesTreeProvider: IssuesTreeDataProvider,

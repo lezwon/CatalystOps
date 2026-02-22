@@ -49,6 +49,10 @@
       {
         "command": "catalystops.showGeneratedScript",
         "title": "CatalystOps: Show Generated Script"
+      },
+      {
+        "command": "catalystops.previewDryRunScript",
+        "title": "CatalystOps: Preview Dry-Run Script"
       }
     ],
     "keybindings": [

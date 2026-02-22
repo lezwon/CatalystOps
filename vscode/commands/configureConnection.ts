@@ -24,7 +24,7 @@ export async function configureConnection(): Promise<void> {
 
         items.push({
             label: '$(add) Enter manually...',
-            description: 'Type host, token, and cluster ID manually',
+            description: 'Type host, token, and optional cluster ID manually',
         });
 
         const picked = await vscode.window.showQuickPick(items, {
@@ -50,11 +50,11 @@ export async function configureConnection(): Promise<void> {
         await config.update('databricks.profile', profile.name, target);
         await config.update('databricks.host', profile.host, target);
 
-        // If no cluster ID in config, ask for it
+        // If no cluster ID in config, ask for it (blank = serverless)
         let clusterId = profile.clusterId || '';
         if (!clusterId) {
             const input = await vscode.window.showInputBox({
-                prompt: `No cluster_id in profile "${profile.name}". Enter cluster ID`,
+                prompt: `No cluster_id in profile "${profile.name}". Enter cluster ID (leave blank to use serverless)`,
                 placeHolder: '1234-567890-abcdef12',
             });
             if (input === undefined) { return; }
@@ -62,10 +62,15 @@ export async function configureConnection(): Promise<void> {
         }
 
         await config.update('databricks.clusterId', clusterId, target);
-        // Token stays in ~/.databrickscfg — no need to copy it to VS Code settings
+        if (!clusterId) {
+            await config.update('databricks.executionMode', 'serverless', target);
+        }
+        // Clear any stale token from VS Code settings so the one in ~/.databrickscfg is used
+        await config.update('databricks.token', '', target);
 
+        const modeLabel = clusterId ? `cluster ${clusterId}` : 'serverless';
         vscode.window.showInformationMessage(
-            `CatalystOps: Connected using profile "${profile.name}" (${profile.host})`,
+            `CatalystOps: Connected using profile "${profile.name}" (${profile.host}) — ${modeLabel}`,
         );
     } else {
         // No config file found — fall back to manual
@@ -95,7 +100,7 @@ async function manualSetup(config: vscode.WorkspaceConfiguration): Promise<void>
     if (token === undefined) { return; }
 
     const clusterId = await vscode.window.showInputBox({
-        prompt: 'Interactive cluster ID',
+        prompt: 'Interactive cluster ID (leave blank to use serverless)',
         placeHolder: '1234-567890-abcdef12',
         value: config.get<string>('databricks.clusterId', ''),
     });
@@ -109,6 +114,10 @@ async function manualSetup(config: vscode.WorkspaceConfiguration): Promise<void>
     await config.update('databricks.host', host, target);
     await config.update('databricks.token', token, target);
     await config.update('databricks.clusterId', clusterId, target);
+    if (!clusterId) {
+        await config.update('databricks.executionMode', 'serverless', target);
+    }
 
-    vscode.window.showInformationMessage('CatalystOps: Databricks connection configured successfully.');
+    const modeLabel = clusterId ? `cluster ${clusterId}` : 'serverless';
+    vscode.window.showInformationMessage(`CatalystOps: Databricks connection configured successfully — ${modeLabel}.`);
 }

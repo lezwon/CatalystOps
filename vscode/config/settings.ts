@@ -23,7 +23,7 @@ export function getConnectionConfig(): DatabricksConnectionConfig | undefined {
     let host = config.get<string>('databricks.host', '');
     let token = config.get<string>('databricks.token', '');
     let clusterId = config.get<string>('databricks.clusterId', '');
-    const executionMode = config.get<'cluster' | 'serverless'>('databricks.executionMode', 'cluster');
+    let executionMode = config.get<'cluster' | 'serverless'>('databricks.executionMode', 'cluster');
 
     // Always try to fill missing values from ~/.databrickscfg
     const configPath = config.get<string>('databricks.configPath', '~/.databrickscfg');
@@ -36,11 +36,14 @@ export function getConnectionConfig(): DatabricksConnectionConfig | undefined {
         if (!clusterId && fileConfig.clusterId) { clusterId = fileConfig.clusterId; }
     }
 
+    // Blank cluster ID implies serverless
+    if (executionMode === 'cluster' && !clusterId) {
+        executionMode = 'serverless';
+    }
+
     const missing: string[] = [];
     if (!host) { missing.push('host'); }
     if (!token) { missing.push('token'); }
-    // clusterId only required for cluster mode
-    if (executionMode === 'cluster' && !clusterId) { missing.push('clusterId'); }
 
     if (missing.length > 0) {
         const src = fileConfig ? `profile "${profile}" in ${configPath}` : `${configPath} (file not found or profile "${profile}" missing)`;

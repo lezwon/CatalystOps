@@ -12,40 +12,17 @@ export interface ServerlessAvailability {
 }
 
 /**
- * Check whether serverless compute is enabled for this workspace.
- * Uses GET /api/2.0/workspace-conf?keys=enableServerlessCompute.
+ * Check whether serverless compute is available for this workspace.
+ * Always returns available — the workspace-conf key (enableServerlessCompute)
+ * is unreliable on newer workspaces where serverless is enabled at the account
+ * level without setting that key. Any actual unavailability is surfaced when
+ * the job is submitted in submitServerlessRun().
  */
 export async function checkServerlessAvailability(
-    host: string,
-    token: string,
+    _host: string,
+    _token: string,
 ): Promise<ServerlessAvailability> {
-    try {
-        const resp = await apiRequest<Record<string, string>>({
-            host, token, method: 'GET',
-            path: '/api/2.0/workspace-conf?keys=enableServerlessCompute',
-        });
-
-        if (resp.statusCode === 403 || resp.statusCode === 404) {
-            return {
-                available: false,
-                reason: 'Serverless compute requires Databricks Premium tier',
-            };
-        }
-
-        if (resp.data?.enableServerlessCompute === 'true') {
-            return { available: true };
-        }
-
-        return {
-            available: false,
-            reason: 'Serverless compute requires Databricks Premium tier',
-        };
-    } catch {
-        return {
-            available: false,
-            reason: 'Serverless compute requires Databricks Premium tier',
-        };
-    }
+    return { available: true };
 }
 
 /**
@@ -106,9 +83,16 @@ export async function submitServerlessRun(
         path: '/api/2.0/jobs/runs/submit',
         body: {
             run_name: 'catalystops-dryrun',
+            environments: [
+                {
+                    environment_key: 'default',
+                    spec: { client: '1' },
+                },
+            ],
             tasks: [
                 {
                     task_key: 'analysis',
+                    environment_key: 'default',
                     spark_python_task: { python_file: dbfsPath },
                 },
             ],
@@ -116,7 +100,8 @@ export async function submitServerlessRun(
     });
 
     if (resp.statusCode !== 200 || resp.data.run_id === undefined) {
-        throw new Error(`Failed to submit serverless run: ${JSON.stringify(resp.data)}`);
+        const reason = resp.data?.message ?? JSON.stringify(resp.data);
+        throw new Error(`Failed to submit serverless run: ${reason}`);
     }
 
     return String(resp.data.run_id);

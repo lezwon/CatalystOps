@@ -8,7 +8,7 @@ import * as vscode from 'vscode';
 import { analyzeCode } from './analysis/codeAnalyzer';
 import { createDiagnosticCollection, setCodeIssueDiagnostics, clearDiagnostics } from './providers/diagnosticsProvider';
 import { createStatusBar, setIdle, setAnalyzing, setResults, setError } from './views/statusBar';
-import { analyzeCost, showGeneratedScript } from './commands/analyzeCost';
+import { analyzeCost, showGeneratedScript, previewDryRunScript } from './commands/analyzeCost';
 import { initOutputChannel } from './logger';
 import { initTelemetry, sendEvent } from './telemetry';
 import { analyzeSelection } from './commands/analyzeSelection';
@@ -41,6 +41,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('catalystops.showReport', () => showReport(context)),
         vscode.commands.registerCommand('catalystops.configureConnection', () => configureConnection()),
         vscode.commands.registerCommand('catalystops.showGeneratedScript', () => showGeneratedScript()),
+        vscode.commands.registerCommand('catalystops.previewDryRunScript', () => previewDryRunScript()),
     );
 
     // Register providers for Python files
