@@ -56,9 +56,11 @@ export const DANGEROUS_ACTIONS = [
 
 /** DBU cost estimation defaults */
 export const DBU_DEFAULTS = {
-    secondsPerCostPoint: 0.1,    // 1 cost point ≈ 0.1s cluster time
-    coresPerDBU: 4,               // rough: 1 DBU ≈ 4 cores
-    defaultDBURatePerHour: 0.40,  // Jobs Compute standard
+    secondsPerCostPoint: 0.1,               // 1 cost point ≈ 0.1s cluster time
+    coresPerDBU: 4,                          // rough: 1 DBU ≈ 4 cores
+    defaultDBURatePerHour: 0.40,             // Jobs Compute standard
+    defaultServerlessRatePerHour: 0.70,      // Serverless Jobs (DBU rate × typical DBU/hr)
+    serverlessThroughputBytesPerSec: 500 * 1024 * 1024, // 500 MB/s conservative Delta scan
 } as const;
 
 /** Python code patterns that indicate PySpark usage */

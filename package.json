@@ -104,7 +104,12 @@
         "catalystops.cost.dbuRatePerHour": {
           "type": "number",
           "default": 0.4,
-          "description": "DBU rate per hour for cost estimation (dollars)"
+          "description": "DBU rate per hour for interactive cluster cost estimation (dollars)"
+        },
+        "catalystops.cost.serverlessRatePerHour": {
+          "type": "number",
+          "default": 0.7,
+          "description": "Effective cost per hour for serverless runs (dollars). Used with data-volume-based cost estimation. Rough guide: DBU rate × expected DBUs/hour for your workload."
         },
         "catalystops.databricks.executionMode": {
           "type": "string",

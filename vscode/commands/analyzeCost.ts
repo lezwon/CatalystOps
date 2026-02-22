@@ -22,7 +22,7 @@ import { analyzeCode } from '../analysis/codeAnalyzer';
 import { parsePlanFromResults } from '../analysis/planParser';
 import { mapResultsToDiagnostics, mapPlanIssuesToDiagnostics } from '../analysis/resultMapper';
 import { updateCache } from '../analysis/analysisCache';
-import { estimateDollarCost, estimateDollarCostFromDuration, costLabel } from '../analysis/costModel';
+import { estimateDollarCost, estimateDollarCostFromDuration, estimateDollarCostFromTableStats, costLabel } from '../analysis/costModel';
 import { setCodeIssueDiagnostics } from '../providers/diagnosticsProvider';
 import { setAnalyzing, setResults, setError, setIdle } from '../views/statusBar';
 import { IssuesTreeDataProvider, ProgressStep, ProgressStepStatus } from '../views/issuesTreeView';
@@ -318,8 +318,9 @@ export async function analyzeCost(
         // Parse plan issues and update analysis cache (for CodeLens refresh trigger)
         const planIssues = parsePlanFromResults(analysisResults);
         const cluster = analysisResults[0]?.cluster;
-        const dbuRate = vscode.workspace.getConfiguration('catalystops')
-            .get<number>('cost.dbuRatePerHour');
+        const catalystConfig = vscode.workspace.getConfiguration('catalystops');
+        const dbuRate = catalystConfig.get<number>('cost.dbuRatePerHour');
+        const serverlessRate = catalystConfig.get<number>('cost.serverlessRatePerHour');
         updateCache(analysisResults, planIssues, editor.document);
 
         const clusterDiagnostics = mapResultsToDiagnostics(analysisResults, editor.document);
@@ -328,17 +329,31 @@ export async function analyzeCost(
 
         finishStep('done', `${analysisResults.length} DataFrame(s)`);
 
-        // Total cost estimate — uses actual measured plan execution duration when
-        // available (AQE triggers real execution), otherwise falls back to heuristic.
+        // Cost estimate — three strategies in priority order:
+        //   1. Serverless + table stats → data-volume-based estimate (most accurate for serverless)
+        //   2. Cluster + planDurationMs  → duration-based estimate (AQE triggered real execution)
+        //   3. Fallback                  → heuristic point score
+        const tableStats = parsed?.tableStats ?? {};
+        const totalBytes = Object.values(tableStats).reduce(
+            (s, t) => s + (t.sizeInBytes ?? 0), 0,
+        );
         const totalDurationMs = analysisResults.reduce((s, r) => s + (r.planDurationMs ?? 0), 0);
-        const runCost = totalDurationMs > 0 && cluster
-            ? estimateDollarCostFromDuration(totalDurationMs, cluster, dbuRate)
-            : estimateDollarCost(planIssues.reduce((s, pi) => s + pi.costPoints, 0), cluster, dbuRate);
-        const durationSec = (totalDurationMs / 1000).toFixed(1);
+
+        let runCost;
+        let costDetail: string;
+        if (config.executionMode === 'serverless' && totalBytes > 0) {
+            runCost = estimateDollarCostFromTableStats(totalBytes, serverlessRate);
+            const totalMB = (totalBytes / 1024 / 1024).toFixed(0);
+            const tableCount = Object.keys(tableStats).length;
+            costDetail = `${runCost.formatted} (${totalMB} MB across ${tableCount} table${tableCount !== 1 ? 's' : ''})`;
+        } else if (totalDurationMs > 0 && (cluster?.totalCores ?? 0) > 1) {
+            runCost = estimateDollarCostFromDuration(totalDurationMs, cluster!, dbuRate);
+            costDetail = `${runCost.formatted} (${(totalDurationMs / 1000).toFixed(1)}s on ${cluster?.totalCores ?? 0} cores)`;
+        } else {
+            runCost = estimateDollarCost(planIssues.reduce((s, pi) => s + pi.costPoints, 0), cluster, dbuRate);
+            costDetail = runCost.formatted;
+        }
         const costLbl = runCost.dollars !== undefined ? costLabel(Math.round(runCost.dollars * 10000)) : '';
-        const costDetail = totalDurationMs > 0
-            ? `${runCost.formatted} (${durationSec}s on ${cluster?.totalCores ?? 0} cores)`
-            : runCost.formatted;
         log(`Estimated cost to run: ${costDetail}${costLbl ? ` — ${costLbl}` : ''}`);
         addStep('Estimated cost', 'done', costDetail);
 

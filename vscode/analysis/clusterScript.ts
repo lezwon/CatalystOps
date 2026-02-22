@@ -442,10 +442,57 @@ _catalystops_errors.append({
     "capture_fn_available": '_catalystops_capture' in _catalystops_user_ns,
 })
 
+def _catalystops_get_table_stats(plan_texts):
+    """Extract Delta/Parquet table names from physical plans and get sizes via DESCRIBE DETAIL."""
+    import re as _re_t
+    # Matches: FileScan delta spark_catalog.schema.table [cols...]
+    #          FileScan parquet schema.table [cols...]
+    _tbl_re = _re_t.compile(
+        r'FileScan (?:delta|parquet|orc)\s+(\\w+(?:\\.\\w+){1,2})\\s*\\[',
+        _re_t.IGNORECASE,
+    )
+    _seen = set()
+    for _plan in plan_texts:
+        for _m in _tbl_re.finditer(_plan):
+            _seen.add(_m.group(1))
+    _stats = {}
+    for _tbl in _seen:
+        _parts = _tbl.split('.')
+        # Build backtick-quoted name for SQL
+        _quoted = '.'.join(f'\`{p}\`' for p in _parts)
+        try:
+            _row = spark.sql(f"DESCRIBE DETAIL {_quoted}").collect()[0]
+            _stats[_tbl] = {
+                "sizeInBytes": _row['sizeInBytes'],
+                "numFiles": _row['numFiles'],
+                "format": _row['format'],
+            }
+        except Exception:
+            if len(_parts) == 3:
+                # Retry without catalog prefix (spark_catalog.schema.table → schema.table)
+                _short = '.'.join(f'\`{p}\`' for p in _parts[1:])
+                try:
+                    _row = spark.sql(f"DESCRIBE DETAIL {_short}").collect()[0]
+                    _stats[_tbl] = {
+                        "sizeInBytes": _row['sizeInBytes'],
+                        "numFiles": _row['numFiles'],
+                        "format": _row['format'],
+                    }
+                except Exception:
+                    pass
+    return _stats
+
+_all_plans = [
+    r.get("executionPlan", {}).get("physicalPlan", "")
+    for r in _catalystops_results
+]
+_catalystops_table_stats = _catalystops_get_table_stats(_all_plans)
+
 # Output results between sentinel markers
 _output = json.dumps({
     "results": _catalystops_results,
     "errors": _catalystops_errors,
+    "tableStats": _catalystops_table_stats,
 })
 print("${RESULT_START_MARKER}")
 print(_output)
@@ -459,7 +506,7 @@ print("${RESULT_END_MARKER}")
  * Extract the JSON result from cluster command output.
  * Looks for content between sentinel markers.
  */
-export function extractResult(output: string): { results: unknown[]; errors: unknown[] } | undefined {
+export function extractResult(output: string): { results: unknown[]; errors: unknown[]; tableStats?: Record<string, { sizeInBytes?: number; numFiles?: number; format?: string }> } | undefined {
     const startIdx = output.indexOf(RESULT_START_MARKER);
     const endIdx = output.indexOf(RESULT_END_MARKER);
 

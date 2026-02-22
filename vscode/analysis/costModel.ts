@@ -107,6 +107,32 @@ export function estimateDollarCost(
 }
 
 /**
+ * Estimate dollar cost for a serverless run from the total scanned data size.
+ *
+ * Formula: dollars = (totalBytes / throughput_per_sec / 3600) * ratePerHour
+ *
+ * throughput: conservative Delta scan speed (500 MB/s without Photon)
+ * ratePerHour: user-configured serverless $/hr (DBU rate × expected DBUs/hr)
+ */
+export function estimateDollarCostFromTableStats(
+    totalBytes: number,
+    serverlessRatePerHour?: number,
+): DollarEstimate {
+    if (totalBytes === 0) {
+        return { formatted: 'unknown', costPoints: 0 };
+    }
+    const rate = serverlessRatePerHour ?? DBU_DEFAULTS.defaultServerlessRatePerHour;
+    const throughput = DBU_DEFAULTS.serverlessThroughputBytesPerSec;
+    const estimatedHours = totalBytes / throughput / 3600;
+    const dollars = estimatedHours * rate;
+    return {
+        formatted: dollars < 0.0001 ? '<$0.0001' : `~$${dollars.toFixed(4)}`,
+        dollars,
+        costPoints: 0,
+    };
+}
+
+/**
  * Estimate dollar cost from actual measured execution duration.
  *
  * When AQE is enabled, queryExecution().executedPlan() triggers real query
