@@ -29,15 +29,9 @@ Detects anti-patterns instantly via regex-based pattern matching with full comme
 |----------|--------|
 | **Critical** | `collect()`, `crossJoin()`, SQL injection via f-strings in `spark.sql()` |
 | **Warning** | UDFs, `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `dropDuplicates` on streaming DataFrame (cross-batch stateful dedup), `withColumn` in loops, non-deterministic UDFs in UDFs, deprecated pandas `.append()`, `.rdd` conversion, unnecessary `count()`, `checkpoint()` (triggers HDFS write) |
-| **Info** | Schema inference, chained `.filter()`, `show()` in production, `display()` in production, `cache()` without `unpersist()`, `select("*")`, global `orderBy`, missing write mode, `pandas_udf`, `to_pandas_on_spark()`, `Cross Join`, `Join Without broadcast()`, `Table May Lack Statistics` |
+| **Info** | Schema inference, chained `.filter()`, `show()` in production, `display()` in production, `cache()` without `unpersist()`, `select("*")`, global `orderBy`, missing write mode, `pandas_udf`, `to_pandas_on_spark()`, `Table May Lack Statistics` |
 
 Each issue shows a **one-line explanation** and a **quick fix code block** on hover.
-
-#### Streaming Dedup Detection
-
-When your file uses `readStream`, CatalystOps flags all `dropDuplicates()` calls with a streaming-specific warning:
-
-> **`dropDuplicates` on Streaming DataFrame (Cross-Batch Stateful Dedup)** — `dropDuplicates` on a streaming DataFrame creates a `StreamingDeduplicate` node (visible in the Catalyst plan as step `(13) StreamingDeduplicate`). This maintains state **across all micro-batches** — each key is emitted only the first time it is seen, and every subsequent update is silently dropped forever. This is rarely the intended behavior for update or change-data streams.
 
 ---
 
