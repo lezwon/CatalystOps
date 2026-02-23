@@ -81,6 +81,7 @@ export async function previewDryRunScript(): Promise<void> {
     await vscode.window.showTextDocument(doc, { preview: true });
 }
 
+
 export async function analyzeCost(
     context: vscode.ExtensionContext,
     issuesTreeProvider: IssuesTreeDataProvider,
@@ -119,6 +120,11 @@ export async function analyzeCost(
     const localIssues = analyzeCode(code);
     log(`Local analysis complete: ${localIssues.length} issue(s) found`);
     finishStep('done', `${localIssues.length} issue(s)`);
+
+    // Show local results immediately so diagnostics are visible while dry run executes
+    setCodeIssueDiagnostics(editor.document.uri, localIssues);
+    issuesTreeProvider.updateFromCodeIssues(localIssues);
+    updateStatusBar(localIssues);
 
     // Try cluster analysis
     const config = getConnectionConfig();
@@ -165,6 +171,7 @@ export async function analyzeCost(
             if (!availability.available) {
                 finishStep('error', availability.reason);
                 log(`Serverless not available: ${availability.reason}`);
+                sendEvent('dry_run/serverless_unavailable', { reason: availability.reason ?? 'unknown' });
                 vscode.window.showErrorMessage(
                     `CatalystOps: ${availability.reason ?? 'Serverless compute not available on this workspace. Databricks Premium tier is required.'}`,
                 );
@@ -199,6 +206,7 @@ export async function analyzeCost(
                 finishStep('error', 'timed out');
                 logError('Serverless job run timed out');
                 setError('Serverless job run timed out');
+                sendEvent('dry_run/run_timeout', { executionMode: 'serverless' });
                 vscode.window.showErrorMessage('CatalystOps: Serverless job run timed out.');
                 setCodeIssueDiagnostics(editor.document.uri, localIssues);
                 issuesTreeProvider.updateFromCodeIssues(localIssues);
@@ -210,6 +218,7 @@ export async function analyzeCost(
                 finishStep('error', 'run failed');
                 logError('Serverless job run failed');
                 setError('Serverless job run failed');
+                sendEvent('dry_run/run_failed', { executionMode: 'serverless' });
                 vscode.window.showErrorMessage('CatalystOps: Serverless job run failed. Check the Databricks Jobs UI for details.');
                 setCodeIssueDiagnostics(editor.document.uri, localIssues);
                 issuesTreeProvider.updateFromCodeIssues(localIssues);
@@ -232,6 +241,7 @@ export async function analyzeCost(
             if (!running) {
                 finishStep('error', 'not ready');
                 log('Cluster not ready — aborting cluster analysis');
+                sendEvent('dry_run/cluster_not_ready');
                 setCodeIssueDiagnostics(editor.document.uri, localIssues);
                 issuesTreeProvider.updateFromCodeIssues(localIssues);
                 updateStatusBar(localIssues);
@@ -257,6 +267,7 @@ export async function analyzeCost(
                 const errorMsg = result.results?.cause || result.results?.data || 'Unknown error';
                 logError(`Cluster execution failed: ${errorMsg}`);
                 setError(errorMsg.substring(0, 100));
+                sendEvent('dry_run/cluster_execution_error', { error: errorMsg.substring(0, 200) });
                 vscode.window.showErrorMessage(`CatalystOps cluster analysis failed: ${errorMsg}`);
                 setCodeIssueDiagnostics(editor.document.uri, localIssues);
                 issuesTreeProvider.updateFromCodeIssues(localIssues);
@@ -285,9 +296,20 @@ export async function analyzeCost(
         for (const e of actualErrors as any[]) {
             logError(`Execution error: ${e.error || e.traceback || JSON.stringify(e)}`);
         }
+        if (actualErrors.length > 0) {
+            sendEvent('dry_run/execution_errors', {
+                executionMode: config.executionMode,
+                errorCount: String(actualErrors.length),
+            });
+        }
 
         if (!parsed || parsed.results.length === 0) {
             finishStep('error', 'no DataFrames found');
+            sendEvent('dry_run/parse_failed', {
+                executionMode: config.executionMode,
+                hasOutput: String(!!output),
+                hasExecutionErrors: String(actualErrors.length > 0),
+            });
             setCodeIssueDiagnostics(editor.document.uri, localIssues);
             issuesTreeProvider.updateFromCodeIssues(localIssues);
             updateStatusBar(localIssues);
@@ -382,6 +404,7 @@ export async function analyzeCost(
         setError(message.substring(0, 100));
         sendEvent('analysis/failed', {
             executionMode: config?.executionMode ?? 'unknown',
+            error: message.substring(0, 200),
         });
         vscode.window.showErrorMessage(`CatalystOps: ${message}`);
 

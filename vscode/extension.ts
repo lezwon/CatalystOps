@@ -9,8 +9,8 @@ import { analyzeCode } from './analysis/codeAnalyzer';
 import { createDiagnosticCollection, setCodeIssueDiagnostics, clearDiagnostics } from './providers/diagnosticsProvider';
 import { createStatusBar, setIdle, setAnalyzing, setResults, setError } from './views/statusBar';
 import { analyzeCost, showGeneratedScript, previewDryRunScript } from './commands/analyzeCost';
-import { initOutputChannel } from './logger';
-import { initTelemetry, sendEvent } from './telemetry';
+import { initOutputChannel, logDebug, logError } from './logger';
+import { initTelemetry, sendEvent, maybeShowFeedbackToast } from './telemetry';
 import { analyzeSelection } from './commands/analyzeSelection';
 import { showReport } from './commands/showReport';
 import { configureConnection } from './commands/configureConnection';
@@ -25,84 +25,110 @@ export function activate(context: vscode.ExtensionContext): void {
     initTelemetry(context);
     sendEvent('extension/activated');
 
-    const diagnostics = createDiagnosticCollection();
-    const statusBar = createStatusBar();
+    try {
+        const diagnostics = createDiagnosticCollection();
+        const statusBar = createStatusBar();
 
-    // Issues tree view
-    const issuesTreeProvider = new IssuesTreeDataProvider();
-    vscode.window.registerTreeDataProvider('catalystops.issuesTree', issuesTreeProvider);
+        // Issues tree view
+        const issuesTreeProvider = new IssuesTreeDataProvider();
+        vscode.window.registerTreeDataProvider('catalystops.issuesTree', issuesTreeProvider);
 
-    // Register commands
-    context.subscriptions.push(
-        diagnostics,
-        statusBar,
-        vscode.commands.registerCommand('catalystops.analyzeCost', () => analyzeCost(context, issuesTreeProvider)),
-        vscode.commands.registerCommand('catalystops.analyzeSelection', () => analyzeSelection(context, issuesTreeProvider)),
-        vscode.commands.registerCommand('catalystops.showReport', () => showReport(context)),
-        vscode.commands.registerCommand('catalystops.configureConnection', () => configureConnection()),
-        vscode.commands.registerCommand('catalystops.showGeneratedScript', () => showGeneratedScript()),
-        vscode.commands.registerCommand('catalystops.previewDryRunScript', () => previewDryRunScript()),
-    );
-
-    // Register providers for Python files
-    const pythonSelector: vscode.DocumentSelector = { language: 'python', scheme: 'file' };
-    context.subscriptions.push(
-        vscode.languages.registerCodeLensProvider(pythonSelector, createCodeLensProvider()),
-        vscode.languages.registerHoverProvider(pythonSelector, createHoverProvider()),
-        vscode.languages.registerCodeActionsProvider(pythonSelector, createCodeActionProvider(), {
-            providedCodeActionKinds: [vscode.CodeActionKind.QuickFix],
-        }),
-    );
-
-    // Run local analysis on active editor
-    const config = vscode.workspace.getConfiguration('catalystops');
-    if (config.get<boolean>('analysis.enableLocalCodeAnalysis', true)) {
-        // Analyze on open and change
-        if (vscode.window.activeTextEditor?.document.languageId === 'python') {
-            runLocalAnalysis(vscode.window.activeTextEditor.document, issuesTreeProvider);
-        }
-
+        // Register commands
         context.subscriptions.push(
-            vscode.window.onDidChangeActiveTextEditor(editor => {
-                if (editor?.document.languageId === 'python') {
-                    runLocalAnalysis(editor.document, issuesTreeProvider);
-                }
-            }),
-            vscode.workspace.onDidChangeTextDocument(event => {
-                if (event.document.languageId === 'python' &&
-                    event.document === vscode.window.activeTextEditor?.document) {
-                    runLocalAnalysis(event.document, issuesTreeProvider);
-                }
-            }),
-            vscode.workspace.onDidCloseTextDocument(doc => {
-                clearDiagnostics(doc.uri);
+            diagnostics,
+            statusBar,
+            vscode.commands.registerCommand('catalystops.analyzeCost', () => analyzeCost(context, issuesTreeProvider)),
+            vscode.commands.registerCommand('catalystops.analyzeSelection', () => analyzeSelection(context, issuesTreeProvider)),
+            vscode.commands.registerCommand('catalystops.showReport', () => showReport(context)),
+            vscode.commands.registerCommand('catalystops.configureConnection', () => configureConnection()),
+            vscode.commands.registerCommand('catalystops.showGeneratedScript', () => showGeneratedScript()),
+            vscode.commands.registerCommand('catalystops.previewDryRunScript', () => previewDryRunScript()),
+        );
+
+        // Register providers for Python files
+        const pythonSelector: vscode.DocumentSelector = { language: 'python', scheme: 'file' };
+        context.subscriptions.push(
+            vscode.languages.registerCodeLensProvider(pythonSelector, createCodeLensProvider()),
+            vscode.languages.registerHoverProvider(pythonSelector, createHoverProvider()),
+            vscode.languages.registerCodeActionsProvider(pythonSelector, createCodeActionProvider(), {
+                providedCodeActionKinds: [vscode.CodeActionKind.QuickFix],
             }),
         );
 
-        // Auto-analyze on save if configured
-        if (config.get<boolean>('analysis.autoAnalyzeOnSave', false)) {
+        // Run local analysis on active editor
+        const config = vscode.workspace.getConfiguration('catalystops');
+        if (config.get<boolean>('analysis.enableLocalCodeAnalysis', true)) {
+            // Analyze on open and change
+            if (vscode.window.activeTextEditor?.document.languageId === 'python') {
+                runLocalAnalysis(vscode.window.activeTextEditor.document, issuesTreeProvider);
+            }
+
+            let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+
             context.subscriptions.push(
-                vscode.workspace.onDidSaveTextDocument(doc => {
-                    if (doc.languageId === 'python') {
-                        analyzeCost(context, issuesTreeProvider);
+                vscode.window.onDidChangeActiveTextEditor(editor => {
+                    if (editor?.document.languageId === 'python') {
+                        runLocalAnalysis(editor.document, issuesTreeProvider);
+                        void maybeShowFeedbackToast();
                     }
                 }),
+                vscode.workspace.onDidChangeTextDocument(event => {
+                    if (event.document.languageId === 'python' &&
+                        event.document === vscode.window.activeTextEditor?.document) {
+                        clearTimeout(debounceTimer);
+                        debounceTimer = setTimeout(() => {
+                            runLocalAnalysis(event.document, issuesTreeProvider);
+                        }, 500);
+                    }
+                }),
+                vscode.workspace.onDidCloseTextDocument(doc => {
+                    clearDiagnostics(doc.uri);
+                }),
             );
+
+            // Auto-analyze (local only) on save if configured.
+            // Note: the full dry-run (Databricks execution) must always be triggered manually.
+            if (config.get<boolean>('analysis.autoAnalyzeOnSave', false)) {
+                context.subscriptions.push(
+                    vscode.workspace.onDidSaveTextDocument(doc => {
+                        if (doc.languageId === 'python') {
+                            runLocalAnalysis(doc, issuesTreeProvider);
+                        }
+                    }),
+                );
+            }
         }
+    } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        sendEvent('extension/activation_failed', { error: message });
+        throw err;
     }
 }
 
 function runLocalAnalysis(document: vscode.TextDocument, issuesTreeProvider: IssuesTreeDataProvider): void {
-    const code = document.getText();
-    const issues = analyzeCode(code);
+    try {
+        const code = document.getText();
+        const issues = analyzeCode(code);
 
-    setCodeIssueDiagnostics(document.uri, issues);
-    issuesTreeProvider.updateFromCodeIssues(issues);
+        setCodeIssueDiagnostics(document.uri, issues);
+        issuesTreeProvider.updateFromCodeIssues(issues);
 
-    const critical = issues.filter(i => i.severity === Severity.CRITICAL).length;
-    const warnings = issues.filter(i => i.severity === Severity.WARNING).length;
-    const info = issues.filter(i => i.severity === Severity.INFO || i.severity === Severity.SUGGESTION).length;
-    setResults(critical, warnings, info);
+        const critical = issues.filter(i => i.severity === Severity.CRITICAL).length;
+        const warnings = issues.filter(i => i.severity === Severity.WARNING).length;
+        const info = issues.filter(i => i.severity === Severity.INFO || i.severity === Severity.SUGGESTION).length;
+        setResults(critical, warnings, info);
+
+        logDebug(`Local analysis: ${issues.length} issue(s) in ${document.fileName}`);
+        sendEvent('local_analysis/complete', {
+            issueCount: String(issues.length),
+            critical: String(critical),
+            warnings: String(warnings),
+        });
+    } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        logError(`Local analysis failed: ${message}`);
+        sendEvent('local_analysis/failed', { error: message.substring(0, 200) });
+    }
 }
 
 export function deactivate(): void {
