@@ -6,7 +6,7 @@
 
 ---
 
-![CatalystOps Demo](https://raw.githubusercontent.com/lezwon/CatalystOps/main/media/demo.gif)
+![CatalystOps Demo](https://iili.io/qFE28FV.gif)
 
 ## Why CatalystOps?
 
