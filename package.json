@@ -153,7 +153,10 @@
     "watch": "tsc -watch -p ./",
     "build": "node esbuild.js --production",
     "lint": "tsc --noEmit",
-    "test": "node ./out/test/suite/index.js"
+    "test": "node ./out/test/suite/index.js",
+    "publish:vsce": "npx vsce publish",
+    "publish:ovsx": "npx ovsx publish -p $OVSX_TOKEN",
+    "publish:all": "npm run publish:vsce && npm run publish:ovsx"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.6",
