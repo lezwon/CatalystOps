@@ -421,22 +421,6 @@ df.select("id", "name", "value")`,
         },
     },
     {
-        id: 'CODE_TABLE_NO_STATS_001',
-        name: 'Table May Lack Statistics',
-        pattern: /spark\.table\s*\(\s*["'][^"']+["']\s*\)|spark\.read\.table\s*\(\s*["'][^"']+["']\s*\)/g,
-        severity: Severity.INFO,
-        category: IssueCategory.JOIN,
-        description: 'Reading a table — verify that table statistics exist. Without statistics, the Catalyst optimizer cannot choose optimal join strategies',
-        fix: {
-            description: 'Run ANALYZE TABLE to compute statistics for better join optimization',
-            code: `# Compute table statistics:
-spark.sql("ANALYZE TABLE my_table COMPUTE STATISTICS")
-
-# Or with column-level stats:
-spark.sql("ANALYZE TABLE my_table COMPUTE STATISTICS FOR ALL COLUMNS")`,
-        },
-    },
-    {
         id: 'CODE_CHECKPOINT_001',
         name: 'checkpoint() Usage',
         pattern: /\.checkpoint\s*\(\s*\)/g,

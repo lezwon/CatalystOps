@@ -167,7 +167,6 @@ function planIssueTitle(name: string): string {
         BroadcastNestedLoopJoin: 'Broadcast Nested Loop Join',
         Exchange: 'Shuffle Exchange',
         TooFewShufflePartitions: 'Too Few Shuffle Partitions',
-        MissingStatistics: 'Missing Table Statistics',
         CacheRescan: 'Cached Relation Re-Scanned',
         CacheMemorySpillRisk: 'Cache Will Spill to Disk',
         LargeCache: 'Large Cached Relation',

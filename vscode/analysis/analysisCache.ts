@@ -119,14 +119,5 @@ function findLineForPlanIssue(
         }
     }
 
-    // For statistics issues, find spark.table() or spark.read.table()
-    if (issue.type === 'statistics') {
-        for (let i = 0; i < lines.length; i++) {
-            if (/spark\.table\s*\(|spark\.read\.table\s*\(/.test(lines[i])) {
-                return i;
-            }
-        }
-    }
-
     return -1;
 }

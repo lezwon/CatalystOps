@@ -334,7 +334,7 @@ def _catalystops_capture(df):
         except Exception:
             _plan = ''
     _catalystops_intercepted.append({'df': df, 'plan': _plan})
-    return None  # mimic writeStream.start() / collect() return value
+    return df  # return df so assigned variables remain usable (e.g. all_rows = capture(df))
 
 # Execute neutralized user code (with imported project files inlined above)
 # Use a single namespace seeded with globals() so that imports made inside
@@ -443,43 +443,88 @@ _catalystops_errors.append({
 })
 
 def _catalystops_get_table_stats(plan_texts):
-    """Extract Delta/Parquet table names from physical plans and get sizes via DESCRIBE DETAIL."""
+    """Extract table names from physical/logical plans, fetch existing statistics,
+    and automatically run ANALYZE TABLE for any table that lacks row-count stats."""
     import re as _re_t
-    # Matches: FileScan delta spark_catalog.schema.table [cols...]
-    #          FileScan parquet schema.table [cols...]
-    _tbl_re = _re_t.compile(
-        r'FileScan (?:delta|parquet|orc)\s+(\\w+(?:\\.\\w+){1,2})\\s*\\[',
-        _re_t.IGNORECASE,
-    )
+    _patterns = [
+        # FileScan / PhotonScan (Photon-enabled workspaces use PhotonScan instead of FileScan)
+        _re_t.compile(r'(?:FileScan|PhotonScan) (?:delta|parquet|orc|json|csv)\\s+([\\w]+(?:\\.[\\w]+){1,2})(?:\\s*\\[|\\s*$)', _re_t.IGNORECASE),
+        # Relation node (Delta / Hive): Relation schema.table[col#0, ...]
+        _re_t.compile(r'Relation\\s+([\\w]+(?:\\.[\\w]+){1,2})\\[', _re_t.IGNORECASE),
+        # HiveTableScan
+        _re_t.compile(r'HiveTableScan\\s+\\[.*?\\]\\s+([\\w.]+)', _re_t.IGNORECASE),
+    ]
     _seen = set()
     for _plan in plan_texts:
-        for _m in _tbl_re.finditer(_plan):
-            _seen.add(_m.group(1))
+        for _pat in _patterns:
+            for _m in _pat.finditer(_plan):
+                _tbl = _m.group(1)
+                # Only keep qualified names (schema.table or catalog.schema.table)
+                if '.' in _tbl:
+                    _seen.add(_tbl)
+
+    def _try_quoted(tbl):
+        """Return (quoted_name, parts) trying catalog-qualified then schema-qualified."""
+        _parts = tbl.split('.')
+        candidates = [_parts]
+        if len(_parts) == 3:
+            candidates.append(_parts[1:])  # drop catalog prefix
+        for _p in candidates:
+            yield '.'.join(f'\`{x}\`' for x in _p), _p
+
+    def _get_row_count(quoted):
+        """Return row count from DESCRIBE EXTENDED Statistics row, or None."""
+        try:
+            for _row in spark.sql(f"DESCRIBE EXTENDED {quoted}").collect():
+                if str(_row['col_name']).strip() == 'Statistics':
+                    _m = _re_t.search(r'([\\d,]+)\\s+rows', str(_row['data_type']))
+                    if _m:
+                        return int(_m.group(1).replace(',', ''))
+        except Exception:
+            pass
+        return None
+
     _stats = {}
     for _tbl in _seen:
-        _parts = _tbl.split('.')
-        # Build backtick-quoted name for SQL
-        _quoted = '.'.join(f'\`{p}\`' for p in _parts)
-        try:
-            _row = spark.sql(f"DESCRIBE DETAIL {_quoted}").collect()[0]
-            _stats[_tbl] = {
-                "sizeInBytes": _row['sizeInBytes'],
-                "numFiles": _row['numFiles'],
-                "format": _row['format'],
-            }
-        except Exception:
-            if len(_parts) == 3:
-                # Retry without catalog prefix (spark_catalog.schema.table → schema.table)
-                _short = '.'.join(f'\`{p}\`' for p in _parts[1:])
-                try:
-                    _row = spark.sql(f"DESCRIBE DETAIL {_short}").collect()[0]
-                    _stats[_tbl] = {
-                        "sizeInBytes": _row['sizeInBytes'],
-                        "numFiles": _row['numFiles'],
-                        "format": _row['format'],
-                    }
-                except Exception:
-                    pass
+        _size_bytes = None
+        _num_files = None
+        _fmt = None
+        _row_count = None
+        _used_quoted = None
+
+        for _quoted, _parts in _try_quoted(_tbl):
+            # ── DESCRIBE DETAIL (Delta) — size, file count, format ─────────────
+            try:
+                _detail = spark.sql(f"DESCRIBE DETAIL {_quoted}").collect()[0]
+                _size_bytes = _detail['sizeInBytes']
+                _num_files  = _detail['numFiles']
+                _fmt        = _detail['format']
+                _used_quoted = _quoted
+                break
+            except Exception:
+                pass
+
+        if _used_quoted is None:
+            # Table not accessible via DESCRIBE DETAIL — skip
+            continue
+
+        # ── Row count: try existing stats first ────────────────────────────────
+        _row_count = _get_row_count(_used_quoted)
+
+        # ── If no row count, run ANALYZE TABLE COMPUTE STATISTICS ──────────────
+        if _row_count is None:
+            try:
+                spark.sql(f"ANALYZE TABLE {_used_quoted} COMPUTE STATISTICS")
+                _row_count = _get_row_count(_used_quoted)
+            except Exception:
+                pass  # table type may not support ANALYZE (e.g. external parquet)
+
+        _stats[_tbl] = {
+            "sizeInBytes": _size_bytes,
+            "numFiles":    _num_files,
+            "format":      _fmt,
+            "rowCount":    _row_count,
+        }
     return _stats
 
 _all_plans = [

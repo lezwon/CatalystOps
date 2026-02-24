@@ -193,32 +193,13 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
             }
         }
 
-        // ── Table name extraction (for statistics warnings) ────────────────────
+        // ── Table name extraction (used by RepeatedFileScan and other detectors) ─
 
-        const fileScanMatch = trimmed.match(/FileScan\s+parquet\s+([\w.]+)/i);
+        const fileScanMatch = trimmed.match(/FileScan\s+(?:parquet|delta|orc|json|csv)\s+([\w.]+)/i);
         const hiveScanMatch = trimmed.match(/HiveTableScan\s+.*?\s+([\w.]+)/i);
         const scannedTable = fileScanMatch?.[1] || hiveScanMatch?.[1];
         if (scannedTable) {
             lastScannedTable = scannedTable;
-        }
-
-        // ── Missing statistics ─────────────────────────────────────────────────
-
-        if (/Statistics\(sizeInBytes=.*?=-1\)/i.test(trimmed) ||
-            (/unknown/i.test(trimmed) && /statistic/i.test(trimmed))) {
-            const tableName = lastScannedTable || undefined;
-            issues.push({
-                type: 'statistics',
-                name: 'MissingStatistics',
-                description: tableName
-                    ? `No statistics found for table ${tableName}. ` +
-                      `Run ANALYZE TABLE ${tableName} COMPUTE STATISTICS to enable better join optimization.`
-                    : 'Table statistics are missing. Run ANALYZE TABLE ... COMPUTE STATISTICS ' +
-                      'to help the optimizer make better join and partition decisions.',
-                costPoints: 15,
-                planLine: trimmed,
-                tableName,
-            });
         }
 
         // ── InMemoryRelation: cache size and re-scan detection ─────────────────

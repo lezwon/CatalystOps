@@ -178,10 +178,6 @@ streaming_df.withWatermark("event_time", "1 hour").dropDuplicates(["id", "event_
         detail: 'Selecting all columns reads unnecessary data. Select only the columns you need.',
         fix: 'df.select("id", "name", "value")  # explicit columns',
     },
-    'Table May Lack Statistics': {
-        detail: 'Without statistics, the optimizer makes suboptimal join and partition decisions.',
-        fix: 'spark.sql("ANALYZE TABLE my_table COMPUTE STATISTICS FOR ALL COLUMNS")',
-    },
     'Join Without broadcast()': {
         detail: 'If one side is small, wrapping it in broadcast() avoids an expensive shuffle join.',
         fix: 'from pyspark.sql.functions import broadcast\nresult = large_df.join(broadcast(small_df), "key")',

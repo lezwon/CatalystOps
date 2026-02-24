@@ -11,8 +11,8 @@ import { ensureClusterRunning } from '../databricks/clusterManager';
 import { executeCommand } from '../databricks/commandExecution';
 import {
     checkServerlessAvailability,
-    uploadScriptToDbfs,
-    deleteDbfsFile,
+    uploadScriptToWorkspace,
+    deleteWorkspaceFile,
     submitServerlessRun,
     pollJobRun,
     getJobRunOutput,
@@ -191,14 +191,14 @@ export async function analyzeCost(
             finishStep('done', `${(script.length / 1024).toFixed(1)} KB`);
 
             addStep('Uploading script', 'running');
-            log('Uploading script to DBFS...');
-            const dbfsPath = await uploadScriptToDbfs(config.host, config.token, script);
-            log(`Script uploaded to ${dbfsPath}`);
-            finishStep('done', dbfsPath);
+            log('Uploading script to Workspace...');
+            const scriptPath = await uploadScriptToWorkspace(config.host, config.token, script);
+            log(`Script uploaded to ${scriptPath}`);
+            finishStep('done', scriptPath);
 
             addStep('Running on serverless', 'running');
             log('Submitting serverless run...');
-            const runId = await submitServerlessRun(config.host, config.token, dbfsPath);
+            const runId = await submitServerlessRun(config.host, config.token, scriptPath);
             log(`Serverless run submitted: run_id=${runId}`);
             const runOutcome = await pollJobRun(config.host, config.token, runId, onPollProgress);
 
@@ -231,7 +231,7 @@ export async function analyzeCost(
             log(`Fetching output for run_id=${runId}...`);
             output = await getJobRunOutput(config.host, config.token, runId);
             lastRawOutput = output;
-            await deleteDbfsFile(config.host, config.token, dbfsPath);
+            await deleteWorkspaceFile(config.host, config.token, scriptPath);
             finishStep('done');
         } else {
             // --- Cluster path ---

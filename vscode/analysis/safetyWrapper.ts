@@ -130,13 +130,42 @@ function stripFStringPrefix(expr: string): string {
 }
 
 /**
- * Try to build an `expr.explain("formatted")` replacement for a dangerous line.
- *
- * Returns the replacement string (preserving leading indentation) or undefined
- * if the DataFrame expression cannot be determined from this line alone
- * (e.g. when the dangerous method is the very first token — a continuation).
+ * Python keywords that may legally precede a method call on a DataFrame but
+ * indicate the call is embedded in a control-flow or expression context rather
+ * than being a standalone dangerous action.
+ * e.g. "if orders.count() > 0:" or "for row in df.collect():"
  */
-function tryReplaceWithExplain(line: string): string | undefined {
+const KEYWORD_RE = /^(if|elif|while|for|return|assert|raise|yield|with|not|and|or|in|is|lambda)\b/;
+
+/**
+ * Find the index of a simple assignment `=` in an expression string, skipping
+ * compound operators (==, !=, <=, >=, :=, +=, -=, *=, /=, **=, //=, etc.).
+ * Returns -1 if no assignment operator is found.
+ */
+function findAssignmentIndex(expr: string): number {
+    for (let i = 0; i < expr.length; i++) {
+        if (expr[i] !== '=') { continue; }
+        const prev = i > 0 ? expr[i - 1] : '';
+        const next = i < expr.length - 1 ? expr[i + 1] : '';
+        if (next === '=') { continue; }              // ==
+        if ('!<>:+-*/%|&^~'.includes(prev)) { continue; } // augmented / comparison
+        return i;
+    }
+    return -1;
+}
+
+/**
+ * Try to build a `_catalystops_capture(expr)` replacement for a dangerous line.
+ *
+ * Return values:
+ *   string    — use this as the replacement line
+ *   null      — dangerous call is embedded in an expression context (e.g.
+ *               "if df.count() > 0:"); keep the line unchanged and do NOT
+ *               start dropping continuation lines
+ *   undefined — method is the very first token (a continuation line like
+ *               "    .write"); comment the line out
+ */
+function tryReplaceWithExplain(line: string): string | null | undefined {
     const trimmed = line.trim();
     const indent = line.substring(0, line.length - line.trimStart().length);
 
@@ -157,8 +186,7 @@ function tryReplaceWithExplain(line: string): string | undefined {
 
         let dfExpr = trimmed.substring(0, m.index).trim();
         if (!dfExpr) {
-            // Method starts the line — this is a continuation line (e.g. "    .write").
-            // We can't build a capture call from this line alone.
+            // Method starts the line — continuation (e.g. "    .write").
             return undefined;
         }
         // Strip outer f-string context if the dangerous call is inside an interpolation,
@@ -166,6 +194,20 @@ function tryReplaceWithExplain(line: string): string | undefined {
         dfExpr = stripFStringPrefix(dfExpr);
         if (!dfExpr) {
             return undefined;
+        }
+        // If the extracted expression starts with a Python keyword the dangerous
+        // call is embedded in a condition/loop (e.g. "if orders.count() > 0:").
+        // Keep the line as-is rather than emitting invalid syntax.
+        if (KEYWORD_RE.test(dfExpr)) {
+            return null;
+        }
+        // If dfExpr contains an assignment (e.g. "all_rows = spark.read.parquet(...)")
+        // preserve the LHS: all_rows = _catalystops_capture(spark.read.parquet(...))
+        const assignIdx = findAssignmentIndex(dfExpr);
+        if (assignIdx !== -1) {
+            const lhs = dfExpr.substring(0, assignIdx).trimEnd();
+            const rhs = dfExpr.substring(assignIdx + 1).trimStart();
+            return `${indent}${lhs} = _catalystops_capture(${rhs})`;
         }
         return `${indent}_catalystops_capture(${dfExpr})`;
     }
@@ -233,13 +275,19 @@ export function neutralizeCode(code: string): string {
         } else {
             if (isDangerousLine(line)) {
                 const replacement = tryReplaceWithExplain(line);
-                result.push(replacement ?? `# [CatalystOps: neutralized] ${line.trimStart()}`);
-                if (bal > 0) {
-                    depth = bal;
-                    dropping = true;
+                if (replacement === null) {
+                    // Dangerous call embedded in an expression context (e.g. "if df.count() > 0:").
+                    // Keep the line unchanged and do NOT start dropping continuations.
+                    result.push(line);
                 } else {
-                    droppingChain = true;
-                    chainDepth = 0;
+                    result.push(replacement ?? `# [CatalystOps: neutralized] ${line.trimStart()}`);
+                    if (bal > 0) {
+                        depth = bal;
+                        dropping = true;
+                    } else {
+                        droppingChain = true;
+                        chainDepth = 0;
+                    }
                 }
             } else {
                 result.push(line);

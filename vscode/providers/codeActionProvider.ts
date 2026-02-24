@@ -150,28 +150,6 @@ function getQuickFixes(
             break;
         }
 
-        case 'CODE_TABLE_NO_STATS_001':
-        case 'STATS_MISSING_001': {
-            // Insert ANALYZE TABLE statement above the flagged line
-            const tableMatch = lineText.match(/(?:spark\.table|spark\.read\.table)\s*\(\s*["']([^"']+)["']\s*\)/);
-            if (tableMatch) {
-                const tableName = tableMatch[1];
-                const edit = new vscode.WorkspaceEdit();
-                const insertPos = new vscode.Position(range.start.line, 0);
-                const indent = lineText.match(/^(\s*)/)?.[1] || '';
-                edit.insert(
-                    document.uri,
-                    insertPos,
-                    `${indent}spark.sql("ANALYZE TABLE ${tableName} COMPUTE STATISTICS")\n`,
-                );
-                fixes.push({
-                    title: `Add ANALYZE TABLE for ${tableName}`,
-                    edit,
-                    isPreferred: true,
-                });
-            }
-            break;
-        }
     }
 
     // Always offer a suppress action for every CatalystOps diagnostic

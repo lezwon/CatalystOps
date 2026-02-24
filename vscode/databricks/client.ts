@@ -10,9 +10,12 @@ import { logDebug } from '../logger';
 export interface RequestOptions {
     host: string;
     token: string;
-    method: 'GET' | 'POST' | 'DELETE';
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE';
     path: string;
     body?: unknown;
+    /** Send body as raw bytes with the given Content-Type instead of JSON. */
+    rawBody?: Buffer;
+    rawContentType?: string;
     timeoutMs?: number;
 }
 
@@ -61,8 +64,14 @@ export function apiRequest<T = unknown>(options: RequestOptions): Promise<ApiRes
     return new Promise((resolve, reject) => {
         const parsed = new URL(options.path, options.host);
         const bodyStr = options.body ? JSON.stringify(options.body) : undefined;
+        const rawBody = options.rawBody;
 
         logDebug(toCurl(options, bodyStr));
+
+        const contentType = rawBody
+            ? (options.rawContentType ?? 'application/octet-stream')
+            : 'application/json';
+        const bodyBytes = rawBody ?? (bodyStr ? Buffer.from(bodyStr, 'utf-8') : undefined);
 
         const reqOptions: https.RequestOptions = {
             hostname: parsed.hostname,
@@ -71,14 +80,14 @@ export function apiRequest<T = unknown>(options: RequestOptions): Promise<ApiRes
             method: options.method,
             headers: {
                 'Authorization': `Bearer ${options.token}`,
-                'Content-Type': 'application/json',
+                'Content-Type': contentType,
                 'User-Agent': 'CatalystOps-VSCode/0.1.0',
             },
             timeout: options.timeoutMs ?? 30000,
         };
 
-        if (bodyStr) {
-            (reqOptions.headers as Record<string, string>)['Content-Length'] = Buffer.byteLength(bodyStr).toString();
+        if (bodyBytes) {
+            (reqOptions.headers as Record<string, string>)['Content-Length'] = bodyBytes.length.toString();
         }
 
         const req = https.request(reqOptions, (res) => {
@@ -91,7 +100,7 @@ export function apiRequest<T = unknown>(options: RequestOptions): Promise<ApiRes
                     const data = raw ? JSON.parse(raw) : {};
                     resolve({ statusCode: res.statusCode ?? 0, data: data as T });
                 } catch {
-                    reject(new Error(`Failed to parse API response: ${raw.substring(0, 200)}`));
+                    resolve({ statusCode: res.statusCode ?? 0, data: raw as unknown as T });
                 }
             });
         });
@@ -102,8 +111,8 @@ export function apiRequest<T = unknown>(options: RequestOptions): Promise<ApiRes
             reject(new Error('Databricks API request timed out'));
         });
 
-        if (bodyStr) {
-            req.write(bodyStr);
+        if (bodyBytes) {
+            req.write(bodyBytes);
         }
         req.end();
     });

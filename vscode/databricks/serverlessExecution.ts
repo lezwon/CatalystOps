@@ -26,43 +26,63 @@ export async function checkServerlessAvailability(
 }
 
 /**
- * Upload a Python script to DBFS and return its path.
- * Path: dbfs:/tmp/catalystops/run_<timestamp>.py
+ * Upload a Python script as a workspace notebook and return its notebook path.
+ * Stored at: /Shared/catalystops/run_<timestamp>  (no .py — workspace import strips it)
+ *
+ * Uses the Workspace Import API with format=SOURCE so the script is stored as a
+ * Python source notebook. Intended to be run with notebook_task, which has a full
+ * Spark context on Databricks serverless compute.
  */
-export async function uploadScriptToDbfs(
+export async function uploadScriptToWorkspace(
     host: string,
     token: string,
     content: string,
 ): Promise<string> {
-    const path = `dbfs:/tmp/catalystops/run_${Date.now()}.py`;
-    const contents = Buffer.from(content, 'utf-8').toString('base64');
+    const notebookPath = `/Shared/catalystops/run_${Date.now()}`;
 
+    // Ensure parent folder exists (mkdirs is idempotent)
+    const mkdirResp = await apiRequest<{ error_code?: string; message?: string }>({
+        host, token, method: 'POST',
+        path: '/api/2.0/workspace/mkdirs',
+        body: { path: '/Shared/catalystops' },
+    });
+    if (mkdirResp.statusCode !== 200) {
+        throw new Error(`Failed to create workspace folder: ${JSON.stringify(mkdirResp.data)}`);
+    }
+
+    const encodedContent = Buffer.from(content, 'utf-8').toString('base64');
     const resp = await apiRequest<{ error_code?: string; message?: string }>({
         host, token, method: 'POST',
-        path: '/api/2.0/dbfs/put',
-        body: { path, contents, overwrite: true },
+        path: '/api/2.0/workspace/import',
+        body: {
+            path: notebookPath,
+            format: 'SOURCE',
+            language: 'PYTHON',
+            content: encodedContent,
+            overwrite: true,
+        },
     });
 
     if (resp.statusCode !== 200) {
-        throw new Error(`Failed to upload script to DBFS: ${JSON.stringify(resp.data)}`);
+        throw new Error(`Failed to upload script to Workspace: ${JSON.stringify(resp.data)}`);
     }
 
-    return path;
+    return notebookPath;
 }
 
 /**
- * Delete a file from DBFS. Best-effort — errors are swallowed.
+ * Delete a workspace notebook. Best-effort — errors are swallowed.
  */
-export async function deleteDbfsFile(
+export async function deleteWorkspaceFile(
     host: string,
     token: string,
-    path: string,
+    notebookPath: string,
 ): Promise<void> {
     try {
         await apiRequest({
             host, token, method: 'POST',
-            path: '/api/2.0/dbfs/delete',
-            body: { path, recursive: false },
+            path: '/api/2.0/workspace/delete',
+            body: { path: notebookPath, recursive: false },
         });
     } catch {
         // Best effort
@@ -70,30 +90,29 @@ export async function deleteDbfsFile(
 }
 
 /**
- * Submit a serverless job run for the given DBFS script path.
+ * Submit a serverless job run for the given script path.
+ * Accepts a workspace path (/Workspace/...) or a DBFS path (dbfs:/...).
  * Returns the run_id string.
  */
 export async function submitServerlessRun(
     host: string,
     token: string,
-    dbfsPath: string,
+    scriptPath: string,
 ): Promise<string> {
     const resp = await apiRequest<{ run_id?: number; error_code?: string; message?: string }>({
         host, token, method: 'POST',
         path: '/api/2.0/jobs/runs/submit',
         body: {
             run_name: 'catalystops-dryrun',
-            environments: [
-                {
-                    environment_key: 'default',
-                    spec: { client: '1' },
-                },
-            ],
+            // notebook_task runs on serverless Spark compute (Free Edition compatible).
+            // No cluster or environments block needed — serverless is used automatically.
             tasks: [
                 {
                     task_key: 'analysis',
-                    environment_key: 'default',
-                    spark_python_task: { python_file: dbfsPath },
+                    notebook_task: {
+                        notebook_path: scriptPath,
+                        source: 'WORKSPACE',
+                    },
                 },
             ],
         },
