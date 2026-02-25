@@ -112,6 +112,11 @@
           "default": 0.7,
           "description": "Effective cost per hour for serverless runs (dollars). Used with data-volume-based cost estimation. Rough guide: DBU rate × expected DBUs/hour for your workload."
         },
+        "catalystops.cost.queryBillingUsage": {
+          "type": "boolean",
+          "default": false,
+          "description": "After each serverless dry run, submit a background job that queries system.billing.usage to fetch the actual DBU consumption and show the real cost. Requires Unity Catalog System Tables to be enabled on your workspace. Billing data typically appears 1–5 minutes after run completion."
+        },
         "catalystops.databricks.executionMode": {
           "type": "string",
           "enum": ["cluster", "serverless"],

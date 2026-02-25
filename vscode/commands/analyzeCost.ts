@@ -17,6 +17,7 @@ import {
     getJobRunPageUrl,
     pollJobRun,
     getJobRunOutput,
+    queryActualRunCost,
 } from '../databricks/serverlessExecution';
 import { generateClusterScript, extractResult } from '../analysis/clusterScript';
 import { analyzeCode } from '../analysis/codeAnalyzer';
@@ -163,6 +164,7 @@ export async function analyzeCost(
 
         let output: string;
         let serverlessRunPageUrl: string | undefined;
+        let serverlessRunId: string | undefined;
 
         if (config.executionMode === 'serverless') {
             // --- Serverless path ---
@@ -201,6 +203,7 @@ export async function analyzeCost(
             addStep('Running on serverless', 'running');
             log('Submitting serverless run...');
             const runId = await submitServerlessRun(config.host, config.token, scriptPath);
+            serverlessRunId = runId;
             log(`Serverless run submitted: run_id=${runId}`);
 
             // Fetch the run page URL immediately so the user can open the live run UI
@@ -439,6 +442,30 @@ export async function analyzeCost(
                 vscode.env.openExternal(vscode.Uri.parse(serverlessRunPageUrl));
             }
         });
+
+        // Fire billing query in background — doesn't block analysis results.
+        // system.billing.usage data typically appears 1–5 minutes after run completion.
+        const billingEnabled = catalystConfig.get<boolean>('cost.queryBillingUsage', false);
+        if (billingEnabled && config.executionMode === 'serverless' && serverlessRunId) {
+            const capturedRunId = serverlessRunId;
+            const capturedRunPageUrl = serverlessRunPageUrl;
+            const capturedRate = dbuRate ?? 0.40;
+            queryActualRunCost(config.host, config.token, capturedRunId).then(billing => {
+                if (!billing) { return; }
+                const actualDollars = (billing.totalDBUs * capturedRate).toFixed(4);
+                const waitNote = billing.waitedSecs ? ` (data arrived after ${billing.waitedSecs}s)` : '';
+                log(`Actual run cost: $${actualDollars} · ${billing.totalDBUs.toFixed(4)} ${billing.usageUnit} — ${billing.skuName}${waitNote}`);
+                vscode.window.showInformationMessage(
+                    `CatalystOps: Actual run cost: $${actualDollars} · ${billing.totalDBUs.toFixed(4)} ${billing.usageUnit} (${billing.skuName})`,
+                    ...(capturedRunPageUrl ? ['Open in Databricks'] : []),
+                ).then(action => {
+                    if (action === 'Open in Databricks' && capturedRunPageUrl) {
+                        vscode.env.openExternal(vscode.Uri.parse(capturedRunPageUrl));
+                    }
+                });
+            }).catch(() => { /* best-effort — billing table may not be enabled */ });
+        }
+
         setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
     } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);

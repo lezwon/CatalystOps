@@ -244,6 +244,91 @@ export async function getJobRunOutput(
     return resp.data?.notebook_output?.result ?? resp.data?.logs ?? '';
 }
 
+export interface BillingResult {
+    totalDBUs: number;
+    usageUnit: string;
+    skuName: string;
+    /** Seconds waited for billing data to appear in system.billing.usage */
+    waitedSecs?: number;
+}
+
+/**
+ * Submit a background serverless job that queries system.billing.usage
+ * for the completed run and returns actual DBU consumption.
+ *
+ * Billing data typically becomes available 1–5 minutes after run completion.
+ * The generated notebook polls internally every 20 seconds for up to 5 minutes.
+ *
+ * Returns null if System Tables are not enabled, the table is inaccessible,
+ * or billing data never appears within the timeout.
+ */
+export async function queryActualRunCost(
+    host: string,
+    token: string,
+    runId: string,
+): Promise<BillingResult | null> {
+    const runIdInt = parseInt(runId, 10);
+    if (isNaN(runIdInt)) { return null; }
+
+    // The billing notebook polls system.billing.usage until data appears.
+    // It tries both 'job_run_id' and 'run_id' field names — the field name
+    // varies across Unity Catalog / workspace versions.
+    const script = `# CatalystOps billing query — auto-generated
+import json
+import time as _time
+
+_run_id = ${runIdInt}
+_start = _time.time()
+_max_wait = 300  # 5 minutes
+_result = None
+
+while _time.time() - _start < _max_wait:
+    for _field in ("job_run_id", "run_id"):
+        try:
+            _rows = spark.sql(f"""
+                SELECT ROUND(SUM(usage_quantity), 6) AS total_dbus,
+                       first(usage_unit)              AS usage_unit,
+                       first(sku_name)                AS sku_name
+                FROM system.billing.usage
+                WHERE usage_metadata.{_field} = {_run_id}
+            """).collect()
+            if _rows and _rows[0]["total_dbus"] and float(_rows[0]["total_dbus"]) > 0:
+                _result = {
+                    "totalDBUs":  float(_rows[0]["total_dbus"]),
+                    "usageUnit":  str(_rows[0]["usage_unit"] or ""),
+                    "skuName":    str(_rows[0]["sku_name"]   or ""),
+                    "waitedSecs": round(_time.time() - _start),
+                }
+                break
+        except Exception:
+            pass
+    if _result:
+        break
+    _time.sleep(20)
+
+dbutils.notebook.exit(json.dumps(_result or {"totalDBUs": 0, "error": "no billing data"}))
+`;
+
+    let billingPath: string | undefined;
+    try {
+        billingPath = await uploadScriptToWorkspace(host, token, script);
+        const billingRunId = await submitServerlessRun(host, token, billingPath);
+        // 8-minute timeout: the notebook itself waits up to 5 min + startup overhead
+        const { outcome } = await pollJobRun(host, token, billingRunId, () => {}, 480_000);
+        if (outcome !== 'SUCCESS') { return null; }
+        const output = await getJobRunOutput(host, token, billingRunId);
+        const parsed = JSON.parse(output.trim()) as BillingResult & { error?: string };
+        if (parsed.error || !parsed.totalDBUs || parsed.totalDBUs <= 0) { return null; }
+        return { totalDBUs: parsed.totalDBUs, usageUnit: parsed.usageUnit, skuName: parsed.skuName, waitedSecs: parsed.waitedSecs };
+    } catch {
+        return null;
+    } finally {
+        if (billingPath) {
+            deleteWorkspaceFile(host, token, billingPath).catch(() => {});
+        }
+    }
+}
+
 /**
  * Cancel a running job. Best-effort — errors are swallowed.
  */
