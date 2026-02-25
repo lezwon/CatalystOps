@@ -10,7 +10,7 @@ import { createDiagnosticCollection, setCodeIssueDiagnostics, clearDiagnostics }
 import { createStatusBar, setIdle, setAnalyzing, setResults, setError } from './views/statusBar';
 import { analyzeCost, showGeneratedScript, previewDryRunScript } from './commands/analyzeCost';
 import { initOutputChannel, logDebug, logError } from './logger';
-import { initTelemetry, sendEvent, maybeShowFeedbackToast } from './telemetry';
+import { initTelemetry, sendEvent, maybeShowFeedbackToast, maybeShowDryRunNudge } from './telemetry';
 import { analyzeSelection } from './commands/analyzeSelection';
 import { showReport } from './commands/showReport';
 import { configureConnection } from './commands/configureConnection';
@@ -118,6 +118,7 @@ function runLocalAnalysis(document: vscode.TextDocument, issuesTreeProvider: Iss
         const info = issues.filter(i => i.severity === Severity.INFO || i.severity === Severity.SUGGESTION).length;
         setResults(critical, warnings, info);
 
+        void maybeShowDryRunNudge(issues.length);
         logDebug(`Local analysis: ${issues.length} issue(s) in ${document.fileName}`);
         sendEvent('local_analysis/complete', {
             issueCount: String(issues.length),

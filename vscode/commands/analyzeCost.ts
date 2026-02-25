@@ -30,7 +30,7 @@ import { setAnalyzing, setResults, setError, setIdle } from '../views/statusBar'
 import { IssuesTreeDataProvider, ProgressStep, ProgressStepStatus } from '../views/issuesTreeView';
 import { AnalysisResult, CodeIssue, Severity } from '../models/types';
 import { log, logDebug, logError, showOutput } from '../logger';
-import { sendEvent } from '../telemetry';
+import { sendEvent, HAS_USED_DRY_RUN_KEY } from '../telemetry';
 
 /** Store the last analysis result for report generation */
 let lastAnalysisResult: AnalysisResult[] | undefined;
@@ -89,6 +89,7 @@ export async function analyzeCost(
     issuesTreeProvider: IssuesTreeDataProvider,
 ): Promise<void> {
     sendEvent('command/analyze_cost');
+    void context.globalState.update(HAS_USED_DRY_RUN_KEY, true);
 
     const editor = vscode.window.activeTextEditor;
     if (!editor || editor.document.languageId !== 'python') {

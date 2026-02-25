@@ -6,6 +6,11 @@ const INSTRUMENTATION_CONNECTION_STRING = 'InstrumentationKey=c2a13996-87aa-4c32
 const FEEDBACK_FORM_URL = 'https://tinyurl.com/catalystopssurvey';
 
 const FEEDBACK_SHOWN_KEY = 'catalystops.feedbackShown';
+const DRY_RUN_NUDGE_SHOWN_KEY = 'catalystops.dryRunNudgeShown';
+const DRY_RUN_NUDGE_SCAN_COUNT_KEY = 'catalystops.dryRunNudgeScanCount';
+export const HAS_USED_DRY_RUN_KEY = 'catalystops.hasUsedDryRun';
+
+const DRY_RUN_NUDGE_SCAN_THRESHOLD = 3;
 
 let reporter: TelemetryReporter | undefined;
 let _context: vscode.ExtensionContext | undefined;
@@ -22,6 +27,39 @@ export function sendEvent(
     properties?: Record<string, string>,
 ): void {
     reporter?.sendTelemetryEvent(eventName, properties);
+}
+
+/**
+ * Nudge users who haven't tried the dry-run feature yet.
+ *
+ * Increments a persistent scan counter each time local analysis finds issues.
+ * Shows the toast once after DRY_RUN_NUDGE_SCAN_THRESHOLD scans with issues,
+ * so new users get time to explore local analysis before being prompted.
+ * Skipped entirely if the user has already run a dry run.
+ */
+export async function maybeShowDryRunNudge(issueCount: number): Promise<void> {
+    if (!_context) { return; }
+    if (issueCount === 0) { return; }
+    if (_context.globalState.get<boolean>(DRY_RUN_NUDGE_SHOWN_KEY)) { return; }
+    if (_context.globalState.get<boolean>(HAS_USED_DRY_RUN_KEY)) { return; }
+
+    const count = (_context.globalState.get<number>(DRY_RUN_NUDGE_SCAN_COUNT_KEY) ?? 0) + 1;
+    await _context.globalState.update(DRY_RUN_NUDGE_SCAN_COUNT_KEY, count);
+
+    if (count < DRY_RUN_NUDGE_SCAN_THRESHOLD) { return; }
+
+    // Threshold reached — mark shown and display after a short pause
+    await _context.globalState.update(DRY_RUN_NUDGE_SHOWN_KEY, true);
+    setTimeout(async () => {
+        if (!_context) { return; }
+        if (_context.globalState.get<boolean>(HAS_USED_DRY_RUN_KEY)) { return; }
+        const label = `CatalystOps found ${issueCount} issue${issueCount !== 1 ? 's' : ''}. Try a deep Catalyst plan analysis on Databricks to catch shuffle, join, and scan issues that only appear at runtime.`;
+        const choice = await vscode.window.showInformationMessage(label, 'Try Dry Run (⌘⇧K)', 'Not now');
+        if (choice === 'Try Dry Run (⌘⇧K)') {
+            sendEvent('dryrun_nudge/clicked');
+            vscode.commands.executeCommand('catalystops.analyzeCost');
+        }
+    }, 2000);
 }
 
 /**
