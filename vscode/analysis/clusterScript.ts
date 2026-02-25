@@ -377,6 +377,57 @@ for _i, _entry in enumerate(_catalystops_intercepted):
         _catalystops_dfs[_captured_name] = _captured_df
         _catalystops_seen_ids.add(id(_captured_df))
 
+# ── Auto-analyze tables with missing/partial statistics ───────────────────────
+# Parse the "Optimizer Statistics" section that Databricks appends to every
+# physical plan, find tables listed as missing/partial, run ANALYZE TABLE
+# FOR ALL COLUMNS on each, then re-explain the affected DataFrames so the
+# results reflect fresh statistics.
+import re as _co_re
+_co_scan_re   = _co_re.compile(r'(?:FileScan|PhotonScan) \\w+ ([\\w]+(?:\\.[\\w]+){1,2})', _co_re.IGNORECASE)
+_co_missing_re = _co_re.compile(r'(?:missing|partial)\\s*=\\s*([^\\n]+)', _co_re.IGNORECASE)
+
+_co_short_to_full = {}   # short_name → qualified_name  (e.g. sales_transactions → samples.bakehouse.sales_transactions)
+_co_need_analyze  = set()  # short table names that lack stats
+
+for _co_entry in _catalystops_intercepted:
+    _co_plan = _co_entry.get('plan', '')
+    for _co_m in _co_scan_re.finditer(_co_plan):
+        _co_full = _co_m.group(1)
+        _co_short_to_full[_co_full.split('.')[-1]] = _co_full
+    for _co_m in _co_missing_re.finditer(_co_plan):
+        for _co_t in _co_m.group(1).split(','):
+            _co_t = _co_t.strip()
+            if _co_t:
+                _co_need_analyze.add(_co_t)
+
+_co_analyzed = set()  # short names of tables successfully analyzed
+for _co_short in _co_need_analyze:
+    _co_full  = _co_short_to_full.get(_co_short, _co_short)
+    _co_parts = _co_full.split('.')
+    _co_ok    = False
+    for _co_p in ([_co_parts] + ([_co_parts[1:]] if len(_co_parts) == 3 else [])):
+        _co_q = '.'.join(f'\`{x}\`' for x in _co_p)
+        try:
+            spark.sql(f"ANALYZE TABLE {_co_q} COMPUTE STATISTICS FOR ALL COLUMNS")
+            _co_ok = True
+            break
+        except Exception:
+            pass
+    if _co_ok:
+        _co_analyzed.add(_co_short)
+
+# Re-explain DataFrames that scan a newly analyzed table
+if _co_analyzed:
+    for _co_entry in _catalystops_intercepted:
+        if any(_co_t in _co_entry.get('plan', '') for _co_t in _co_analyzed):
+            try:
+                _co_new_plan = _catalystops_get_plan(_co_entry['df'])
+                if _co_new_plan:
+                    _co_entry['plan'] = _co_new_plan
+                    _catalystops_plan_by_id[id(_co_entry['df'])] = _co_new_plan
+            except Exception:
+                pass
+
 # Collect cluster info once
 _cluster_info = _catalystops_get_cluster_info()
 
