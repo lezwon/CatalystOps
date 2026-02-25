@@ -158,7 +158,7 @@
     "watch": "tsc -watch -p ./",
     "build": "node esbuild.js --production",
     "lint": "tsc --noEmit",
-    "test": "node ./out/test/suite/index.js",
+    "test": "npm run compile && ./node_modules/.bin/mocha 'out/test/suite/*.test.js' --ui tdd --timeout 10000 --reporter spec",
     "publish:vsce": "npx vsce publish",
     "publish:ovsx": "npx ovsx publish -p $OVSX_TOKEN",
     "publish:all": "npm run publish:vsce && npm run publish:ovsx"

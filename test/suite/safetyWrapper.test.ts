@@ -92,8 +92,11 @@ suite('Safety Wrapper', () => {
 
     test('should comment out awaitTermination()', () => {
         const result = neutralizeCode('query.awaitTermination()');
-        assert.ok(!result.includes('query.awaitTermination()'), 'awaitTermination should be removed');
-        assert.ok(result.includes('# [CatalystOps: neutralized]'), 'should be commented out');
+        // The line is preserved as a comment — every line that contains awaitTermination must start with #
+        const lines = result.split('\n').filter(l => l.includes('awaitTermination'));
+        assert.ok(lines.length > 0, 'awaitTermination line should be present (as a comment)');
+        assert.ok(lines.every(l => l.trimStart().startsWith('#')), 'awaitTermination should be commented out');
+        assert.ok(result.includes('# [CatalystOps: neutralized]'), 'should carry the neutralized marker');
     });
 
     // --- Code after dangerous line is preserved ---

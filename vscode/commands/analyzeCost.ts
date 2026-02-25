@@ -89,7 +89,6 @@ export async function analyzeCost(
     issuesTreeProvider: IssuesTreeDataProvider,
 ): Promise<void> {
     sendEvent('command/analyze_cost');
-    void context.globalState.update(HAS_USED_DRY_RUN_KEY, true);
 
     const editor = vscode.window.activeTextEditor;
     if (!editor || editor.document.languageId !== 'python') {
@@ -139,17 +138,20 @@ export async function analyzeCost(
         log('No Databricks connection configured — showing local results only');
         setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
 
-        if (localIssues.length > 0) {
-            vscode.window.showInformationMessage(
-                `CatalystOps: Found ${localIssues.length} local issues. Configure Databricks connection for deep plan analysis.`,
-            );
-        } else {
-            vscode.window.showInformationMessage(
-                'CatalystOps: No local issues found. Configure Databricks connection for deep plan analysis.',
-            );
-        }
+        const noConfigMsg = localIssues.length > 0
+            ? `CatalystOps: Found ${localIssues.length} local issue${localIssues.length !== 1 ? 's' : ''}. Configure a Databricks connection for deep plan analysis.`
+            : 'CatalystOps: No local issues found. Configure a Databricks connection for deep plan analysis.';
+        vscode.window.showInformationMessage(noConfigMsg, 'Configure Now').then(action => {
+            if (action === 'Configure Now') {
+                vscode.commands.executeCommand('catalystops.configureConnection');
+            }
+        });
         return;
     }
+
+    // Databricks is configured and we're about to run — mark dry run as used
+    // so the nudge won't appear again even if this session is interrupted
+    void context.globalState.update(HAS_USED_DRY_RUN_KEY, true);
 
     setAnalyzing();
 

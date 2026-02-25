@@ -1,5 +1,6 @@
 import TelemetryReporter from '@vscode/extension-telemetry';
 import * as vscode from 'vscode';
+import { computeNudgeState } from './nudgeState';
 
 const INSTRUMENTATION_CONNECTION_STRING = 'InstrumentationKey=c2a13996-87aa-4c32-8ed1-efb11c5a18e2;IngestionEndpoint=https://westus3-1.in.applicationinsights.azure.com/;LiveEndpoint=https://westus3.livediagnostics.monitor.azure.com/;ApplicationId=f4fedf89-8fdb-4fee-b968-dc56272aa051';
 
@@ -39,16 +40,18 @@ export function sendEvent(
  */
 export async function maybeShowDryRunNudge(issueCount: number): Promise<void> {
     if (!_context) { return; }
-    if (issueCount === 0) { return; }
-    if (_context.globalState.get<boolean>(DRY_RUN_NUDGE_SHOWN_KEY)) { return; }
-    if (_context.globalState.get<boolean>(HAS_USED_DRY_RUN_KEY)) { return; }
 
-    const count = (_context.globalState.get<number>(DRY_RUN_NUDGE_SCAN_COUNT_KEY) ?? 0) + 1;
-    await _context.globalState.update(DRY_RUN_NUDGE_SCAN_COUNT_KEY, count);
+    const { shouldShow, newScanCount } = computeNudgeState({
+        issueCount,
+        nudgeShown: _context.globalState.get<boolean>(DRY_RUN_NUDGE_SHOWN_KEY) ?? false,
+        hasUsedDryRun: _context.globalState.get<boolean>(HAS_USED_DRY_RUN_KEY) ?? false,
+        currentScanCount: _context.globalState.get<number>(DRY_RUN_NUDGE_SCAN_COUNT_KEY) ?? 0,
+        threshold: DRY_RUN_NUDGE_SCAN_THRESHOLD,
+    });
 
-    if (count < DRY_RUN_NUDGE_SCAN_THRESHOLD) { return; }
+    await _context.globalState.update(DRY_RUN_NUDGE_SCAN_COUNT_KEY, newScanCount);
+    if (!shouldShow) { return; }
 
-    // Threshold reached — mark shown and display after a short pause
     await _context.globalState.update(DRY_RUN_NUDGE_SHOWN_KEY, true);
     setTimeout(async () => {
         if (!_context) { return; }
