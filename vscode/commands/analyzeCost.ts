@@ -14,6 +14,7 @@ import {
     uploadScriptToWorkspace,
     deleteWorkspaceFile,
     submitServerlessRun,
+    getJobRunPageUrl,
     pollJobRun,
     getJobRunOutput,
 } from '../databricks/serverlessExecution';
@@ -201,22 +202,40 @@ export async function analyzeCost(
             log('Submitting serverless run...');
             const runId = await submitServerlessRun(config.host, config.token, scriptPath);
             log(`Serverless run submitted: run_id=${runId}`);
-            const { outcome: runOutcome, runPageUrl } = await pollJobRun(config.host, config.token, runId, onPollProgress);
-            serverlessRunPageUrl = runPageUrl;
 
-            if (runPageUrl) {
-                log(`Databricks run UI: ${runPageUrl}`);
+            // Fetch the run page URL immediately so the user can open the live run UI
+            serverlessRunPageUrl = await getJobRunPageUrl(config.host, config.token, runId);
+            if (serverlessRunPageUrl) {
+                log(`Databricks run UI: ${serverlessRunPageUrl}`);
             }
+
+            // Non-blocking "run started" toast with Open button
+            vscode.window.showInformationMessage(
+                `CatalystOps: Serverless run started (run_id=${runId})`,
+                ...(serverlessRunPageUrl ? ['Open in Databricks'] : []),
+            ).then(action => {
+                if (action === 'Open in Databricks' && serverlessRunPageUrl) {
+                    vscode.env.openExternal(vscode.Uri.parse(serverlessRunPageUrl));
+                }
+            });
+
+            const { outcome: runOutcome, runPageUrl } = await pollJobRun(config.host, config.token, runId, onPollProgress);
+            // Update URL if polling returned a fresher one
+            if (runPageUrl) { serverlessRunPageUrl = runPageUrl; }
 
             if (runOutcome === 'TIMEOUT') {
                 finishStep('error', 'timed out');
                 logError('Serverless job run timed out');
                 setError('Serverless job run timed out');
                 sendEvent('dry_run/run_timeout', { executionMode: 'serverless' });
-                const timeoutMsg = runPageUrl
-                    ? `CatalystOps: Serverless job run timed out. [View run](${runPageUrl})`
-                    : 'CatalystOps: Serverless job run timed out.';
-                vscode.window.showErrorMessage(timeoutMsg);
+                vscode.window.showErrorMessage(
+                    'CatalystOps: Serverless job run timed out.',
+                    ...(serverlessRunPageUrl ? ['Open in Databricks'] : []),
+                ).then(action => {
+                    if (action === 'Open in Databricks' && serverlessRunPageUrl) {
+                        vscode.env.openExternal(vscode.Uri.parse(serverlessRunPageUrl));
+                    }
+                });
                 setCodeIssueDiagnostics(editor.document.uri, localIssues);
                 issuesTreeProvider.updateFromCodeIssues(localIssues);
                 setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
@@ -228,16 +247,20 @@ export async function analyzeCost(
                 logError('Serverless job run failed');
                 setError('Serverless job run failed');
                 sendEvent('dry_run/run_failed', { executionMode: 'serverless' });
-                const failMsg = runPageUrl
-                    ? `CatalystOps: Serverless job run failed. View details: ${runPageUrl}`
-                    : 'CatalystOps: Serverless job run failed. Check the Databricks Jobs UI for details.';
-                vscode.window.showErrorMessage(failMsg);
+                vscode.window.showErrorMessage(
+                    'CatalystOps: Serverless job run failed.',
+                    ...(serverlessRunPageUrl ? ['Open in Databricks'] : []),
+                ).then(action => {
+                    if (action === 'Open in Databricks' && serverlessRunPageUrl) {
+                        vscode.env.openExternal(vscode.Uri.parse(serverlessRunPageUrl));
+                    }
+                });
                 setCodeIssueDiagnostics(editor.document.uri, localIssues);
                 issuesTreeProvider.updateFromCodeIssues(localIssues);
                 setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
                 return;
             }
-            finishStep('done', runPageUrl ? `run_id=${runId}` : undefined);
+            finishStep('done', `run_id=${runId}`);
 
             addStep('Fetching output', 'running');
             log(`Fetching output for run_id=${runId}...`);
@@ -407,9 +430,15 @@ export async function analyzeCost(
             dryRunIssueCount: String(dryRunCount),
         });
 
-        const runUrlSuffix = serverlessRunPageUrl ? ` [View run](${serverlessRunPageUrl})` : '';
-        const msg = `CatalystOps: Analysis complete. ${totalIssues} issues found (${localIssues.length} local, ${dryRunCount} from dry run). Estimated cost: ${runCost.formatted}.${runUrlSuffix}`;
-        vscode.window.showInformationMessage(msg);
+        const msg = `CatalystOps: Analysis complete. ${totalIssues} issues found (${localIssues.length} local, ${dryRunCount} from dry run). Estimated cost: ${runCost.formatted}.`;
+        vscode.window.showInformationMessage(
+            msg,
+            ...(serverlessRunPageUrl ? ['Open in Databricks'] : []),
+        ).then(action => {
+            if (action === 'Open in Databricks' && serverlessRunPageUrl) {
+                vscode.env.openExternal(vscode.Uri.parse(serverlessRunPageUrl));
+            }
+        });
         setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
     } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);

@@ -548,9 +548,82 @@ export function calculatePlanCost(issues: PlanIssue[]): number {
 }
 
 /**
+ * Detect tables/files scanned in more than one DataFrame's physical plan.
+ *
+ * Within a single plan, Spark may scan the same table twice if the same
+ * DataFrame is referenced in multiple branches — that is caught by
+ * seenFileScanPaths inside parsePlan.
+ *
+ * This function detects the CROSS-DATAFRAME case: the same table appearing
+ * in two or more separate DataFrames' physical plans, indicating the data is
+ * read from storage multiple times with no caching in between.
+ */
+function detectCrossPlanRepeatedScans(results: AnalysisResult[]): PlanIssue[] {
+    // path → { dfCount, maxSizeBytes, dfNames }
+    const scanInfo = new Map<string, { dfCount: number; maxSizeBytes: number; dfNames: string[] }>();
+
+    for (const result of results) {
+        if (!result.executionPlan?.physicalPlan) { continue; }
+        const lines = result.executionPlan.physicalPlan.split('\n');
+
+        let inInitialPlan = false;
+        const seenInThisPlan = new Set<string>();
+
+        for (let i = 0; i < lines.length; i++) {
+            const trimmed = lines[i].trim();
+            if (/==\s*Initial Plan\s*==/i.test(trimmed)) { inInitialPlan = true; }
+            if (inInitialPlan) { continue; }
+
+            const path = extractFileScanPath(trimmed);
+            if (!path || seenInThisPlan.has(path)) { continue; }
+            seenInThisPlan.add(path);
+
+            // Look for sizeInBytes on this line or the next 2 (Statistics may follow the scan node)
+            const window = lines.slice(i, Math.min(i + 3, lines.length)).join(' ');
+            const sizeBytes = parseSizeBytes(window) ?? 0;
+
+            const entry = scanInfo.get(path) ?? { dfCount: 0, maxSizeBytes: 0, dfNames: [] };
+            entry.dfCount++;
+            entry.maxSizeBytes = Math.max(entry.maxSizeBytes, sizeBytes);
+            if (result.dataframeName) { entry.dfNames.push(result.dataframeName); }
+            scanInfo.set(path, entry);
+        }
+    }
+
+    const issues: PlanIssue[] = [];
+    for (const [path, { dfCount, maxSizeBytes, dfNames }] of scanInfo) {
+        if (dfCount < 2) { continue; }
+
+        const isLarge = maxSizeBytes > 512 * 1024 * 1024;
+        const shortName = path.split('.').slice(-1)[0];
+        const sizeStr = maxSizeBytes > 0 ? ` (${formatBytes(maxSizeBytes)})` : '';
+        const dfList = dfNames.length > 0
+            ? ` across DataFrames: ${dfNames.join(', ')}`
+            : ` across ${dfCount} DataFrames`;
+
+        issues.push({
+            type: 'cache',
+            name: 'RepeatedFileScan',
+            description: isLarge
+                ? `"${shortName}"${sizeStr} is read without caching${dfList}. ` +
+                  'Each read triggers a full separate storage scan — very expensive for large tables. ' +
+                  'Cache after the first read and reuse the cached DataFrame:\n' +
+                  `  ${dfNames[0] ?? 'df'} = spark.table("${shortName}").cache()\n` +
+                  '  # reuse the cached variable instead of reading again'
+                : `"${shortName}" is read${dfList} without caching. ` +
+                  'Cache after the first read to avoid repeated I/O.',
+            costPoints: isLarge ? 80 : 40,
+            tableName: path,
+        });
+    }
+    return issues;
+}
+
+/**
  * Parse plan data from cluster analysis results.
  * Analyses both physical plan (for FileScan, caches, joins) and
  * analyzed logical plan (for repeated table reads — cleaner table names).
+ * Also detects cross-DataFrame repeated scans of the same table/file.
  */
 export function parsePlanFromResults(results: AnalysisResult[]): PlanIssue[] {
     const allIssues: PlanIssue[] = [];
@@ -559,19 +632,24 @@ export function parsePlanFromResults(results: AnalysisResult[]): PlanIssue[] {
             allIssues.push(...parsePlan(result.executionPlan.physicalPlan, result.cluster));
         }
         // Logical plan gives cleaner table names for repeated-read detection.
-        // Results are merged with physical plan results below.
         if (result.executionPlan?.logicalPlan) {
             allIssues.push(...parseLogicalPlan(result.executionPlan.logicalPlan));
         }
     }
 
-    // Deduplicate: prefer issues with a tableName (more informative) when the
-    // same issue name appears multiple times. Otherwise keep first seen.
+    // Cross-DataFrame: detect tables read in multiple DataFrames without caching.
+    // This is separate from within-plan repeated scans (handled by seenFileScanPaths).
+    allIssues.push(...detectCrossPlanRepeatedScans(results));
+
+    // Deduplicate: use "name:tableName" as the key so different tables each get
+    // their own issue entry. For issues without a tableName (e.g. Exchange),
+    // deduplicate by name alone. Prefer entries with a tableName when merging.
     const seen = new Map<string, PlanIssue>();
     for (const issue of allIssues) {
-        const existing = seen.get(issue.name);
+        const key = issue.tableName ? `${issue.name}:${issue.tableName}` : issue.name;
+        const existing = seen.get(key);
         if (!existing || (!existing.tableName && issue.tableName)) {
-            seen.set(issue.name, issue);
+            seen.set(key, issue);
         }
     }
     return Array.from(seen.values());

@@ -126,6 +126,27 @@ export async function submitServerlessRun(
     return String(resp.data.run_id);
 }
 
+/**
+ * Fetch the Databricks UI URL for a run immediately after submission.
+ * Makes a single jobs/runs/get request and returns run_page_url.
+ * Best-effort — returns undefined if the call fails.
+ */
+export async function getJobRunPageUrl(
+    host: string,
+    token: string,
+    runId: string,
+): Promise<string | undefined> {
+    try {
+        const resp = await apiRequest<{ run_page_url?: string }>({
+            host, token, method: 'GET',
+            path: `/api/2.0/jobs/runs/get?run_id=${runId}`,
+        });
+        return resp.data?.run_page_url;
+    } catch {
+        return undefined;
+    }
+}
+
 type JobRunOutcome = 'SUCCESS' | 'FAILED' | 'TIMEOUT';
 
 interface JobRunGetResponse {
