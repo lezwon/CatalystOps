@@ -1,6 +1,6 @@
 # CatalystOps — PySpark Optimizer
 
-**CatalystOps** catches PySpark performance issues before they hit production. It detects **30+ anti-patterns** locally in real time and runs **safe dry-run analysis** on a Databricks cluster or serverless compute to inspect Catalyst execution plans — all without executing Spark jobs or touching your data.
+**CatalystOps** catches PySpark performance issues before they hit production. It detects **30+ anti-patterns** locally in real time and runs **safe dry-run analysis** on a Databricks cluster or serverless compute to inspect Catalyst execution plans — all without executing Spark jobs or touching your data. Plan parsing is fully **Photon-aware** and detects cross-DataFrame repeated scans across your entire script.
 
 > **Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=CatalystOps.catalystops)**
 
@@ -94,11 +94,14 @@ When a Databricks connection is configured, CatalystOps submits a neutralized ve
 | Issue | What it means |
 |-------|---------------|
 | **Same Source Scanned Multiple Times** | Physical or logical plan shows the same table/file scanned more than once — suggests caching after first read |
+| **Same Table Scanned Across DataFrames** | The same source table appears in the physical plans of multiple DataFrames — read once and cache before reuse |
 | **CSV Format — Use Parquet/Delta** | CSV disables columnar reads, predicate pushdown, and vectorised execution |
 | **Missing Table Statistics** | Optimizer lacks statistics for join and partition decisions |
 | **first() Without Ordering Guarantee** | Non-deterministic result in distributed execution |
 
 > **AQE-aware**: CatalystOps correctly ignores the `== Initial Plan ==` section in Adaptive Query Execution plans to prevent false positives.
+
+> **Photon-aware**: Join, shuffle, and scan detections cover Photon-native node types (`PhotonBroadcastHashJoin`, `PhotonSortMergeJoin`, `PhotonShuffledHashJoin`, `PhotonShuffleExchangeSink`, `PhotonShuffleExchangeSource`, `PhotonScan`) — ensuring accurate issue counts on Photon-accelerated clusters and serverless compute.
 
 ---
 
@@ -112,6 +115,7 @@ When a Databricks connection is configured, CatalystOps submits a neutralized ve
 - **Progress steps** — live sidebar progress showing each analysis stage (local analysis → cluster check → script generation → cluster run → parsing)
 - **Status bar** — real-time issue counts (critical / warning / info)
 - **HTML reports** — shareable full analysis breakdown
+- **Open in Databricks** — clickable button on analysis toast notifications linking directly to the Databricks run UI (shown when the run starts and again on completion)
 
 ---
 
@@ -199,8 +203,26 @@ Leave **Cluster ID blank** in the configuration wizard — CatalystOps automatic
 | `catalystops.databricks.executionMode` | `cluster` | `cluster` or `serverless` — auto-set to `serverless` when cluster ID is blank |
 | `catalystops.analysis.autoAnalyzeOnSave` | `false` | Auto-analyze on save |
 | `catalystops.analysis.enableLocalCodeAnalysis` | `true` | Enable local anti-pattern detection |
-| `catalystops.cost.dbuRatePerHour` | `0.4` | DBU rate ($/hr) for cost estimation |
+| `catalystops.cost.dbuRatePerHour` | `0.4` | DBU rate ($/hr) for interactive cluster cost estimation |
+| `catalystops.cost.serverlessRatePerHour` | `0.7` | Effective hourly cost ($/hr) for serverless runs, used with data-volume-based estimation. Rough guide: DBU rate × expected DBUs/hour for your workload |
+| `catalystops.cost.queryBillingUsage` | `false` | After each serverless dry run, submit a background job that queries `system.billing.usage` to fetch actual DBU consumption and show the real cost. Requires Unity Catalog System Tables |
 | `catalystops.debug` | `false` | Log equivalent curl commands and diagnostic details to the Output panel |
+
+---
+
+## Cost Estimation
+
+After each dry run, CatalystOps estimates the cost of the analysis using the best available signal:
+
+| Strategy | When used | How |
+|----------|-----------|-----|
+| **Actual DBU cost** | Serverless, `queryBillingUsage = true` | A background serverless notebook queries `system.billing.usage` for the completed run's DBU consumption. Billing data typically appears 1–5 minutes after the run; the notebook polls internally every 20 seconds for up to 5 minutes. The actual DBU total is multiplied by `serverlessRatePerHour` and shown in a separate toast notification. |
+| **Data-volume heuristic** | Serverless | Estimates DBUs from total bytes scanned, cluster parallelism, and a Photon efficiency factor. Uses `serverlessRatePerHour` to convert to dollars. |
+| **Cluster-time heuristic** | Interactive cluster | Measures elapsed wall-clock time of the dry run and multiplies by `dbuRatePerHour`. |
+
+The estimated cost is reported in the analysis output and written to the Output panel (with full detail when `debug = true`).
+
+> **Enabling actual cost reporting**: Set `catalystops.cost.queryBillingUsage = true` in your settings. Unity Catalog System Tables must be enabled on your workspace. Interactive cluster runs are billed continuously under the cluster ID and cannot be attributed per-command, so this setting applies to serverless runs only.
 
 ---
 
@@ -227,23 +249,24 @@ Local `.py` files imported by your script are automatically detected and bundled
 └─────────────────┘     └──────────────────────┘
         │
         ▼  (if Databricks configured)
-┌──────────────────┐     ┌──────────────────┐     ┌──────────────────────┐
-│  Safety Wrapper   │────▶│  Cluster Script   │────▶│  Databricks           │
-│  neutralize       │     │  + local file     │     │  Jobs API (dry run)   │
-│  writes/actions   │     │  bundling         │     │  cluster or serverless│
-└──────────────────┘     └──────────────────┘     └──────────┬───────────┘
-                                                             │
-                    ┌────────────────────┐                   │
+┌──────────────────┐     ┌──────────────────┐     ┌──────────────────────────┐
+│  Safety Wrapper   │────▶│  Cluster Script   │────▶│  Databricks               │
+│  neutralize       │     │  + local file     │     │  Jobs API (dry run)       │
+│  writes/actions   │     │  bundling         │     │  cluster or serverless    │
+└──────────────────┘     └──────────────────┘     └──────────┬────────────────┘
+                                                             │  run_page_url → toast
+                    ┌────────────────────┐                   │  "Open in Databricks"
                     │  Plan Parser       │◀──────────────────┘
                     │  Physical plan     │  joins, shuffles, cache,
-                    │  Logical plan      │  repeated scans, spills
+                    │  Logical plan      │  repeated scans (incl. cross-DataFrame),
+                    │  Photon-aware      │  spills, Photon node types
                     └────────┬───────────┘
                              │
-              ┌──────────────▼──────────────┐
-              │  VS Code Diagnostics +       │
-              │  Hover Cards + Tree View +   │
-              │  Status Bar + HTML Report    │
-              └─────────────────────────────┘
+              ┌──────────────▼──────────────┐     ┌──────────────────────────┐
+              │  VS Code Diagnostics +       │     │  Billing Query (opt-in)   │
+              │  Hover Cards + Tree View +   │     │  system.billing.usage     │
+              │  Status Bar + HTML Report    │     │  → actual DBU cost toast  │
+              └─────────────────────────────┘     └──────────────────────────┘
 ```
 
 ---
@@ -294,6 +317,10 @@ catalyst-ops/
 │   │   ├── clusterScript.ts      # Script generation, local file bundling, plan capture
 │   │   ├── resultMapper.ts       # Maps plan issues to VS Code diagnostics
 │   │   └── safetyWrapper.ts      # Neutralizes writes/actions for safe dry run
+│   ├── databricks/
+│   │   ├── client.ts             # Authenticated HTTP client for Databricks REST APIs
+│   │   ├── clusterExecution.ts   # Interactive cluster command submission and polling
+│   │   └── serverlessExecution.ts # Serverless job submission, polling, billing query
 │   ├── commands/
 │   │   ├── analyzeCost.ts        # Full analysis orchestration
 │   │   ├── analyzeSelection.ts   # Selection-scoped analysis
