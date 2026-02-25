@@ -16,3 +16,4 @@ demo.py
 out/**
 !out/vscode/extension.js
 !media/**
+media/demo.gif
