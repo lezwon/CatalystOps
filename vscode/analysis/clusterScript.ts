@@ -539,9 +539,13 @@ _output = json.dumps({
     "errors": _catalystops_errors,
     "tableStats": _catalystops_table_stats,
 })
-print("${RESULT_START_MARKER}")
-print(_output)
-print("${RESULT_END_MARKER}")
+try:
+    dbutils.notebook.exit("${RESULT_START_MARKER}\\n" + _output + "\\n${RESULT_END_MARKER}")
+except NameError:
+    # Fallback for non-notebook environments (e.g. spark_python_task on a cluster)
+    print("${RESULT_START_MARKER}")
+    print(_output)
+    print("${RESULT_END_MARKER}")
 `;
 
     return { script, processedUserCode: fullCode };

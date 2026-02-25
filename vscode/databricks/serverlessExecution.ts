@@ -182,11 +182,13 @@ export async function pollJobRun(
 
 interface JobRunOutputResponse {
     logs?: string;
+    notebook_output?: { result?: string };
 }
 
 /**
- * Retrieve the stdout logs from a completed job run.
- * The sentinel markers used by extractResult() are present in logs.
+ * Retrieve output from a completed job run.
+ * notebook_task puts output in notebook_output.result (via dbutils.notebook.exit()).
+ * spark_python_task / cluster runs put stdout in logs.
  */
 export async function getJobRunOutput(
     host: string,
@@ -202,7 +204,9 @@ export async function getJobRunOutput(
         throw new Error(`Failed to get job run output: ${JSON.stringify(resp.data)}`);
     }
 
-    return resp.data?.logs ?? '';
+    // notebook_task: result is set via dbutils.notebook.exit()
+    // spark_python_task / cluster: result is in driver stdout logs
+    return resp.data?.notebook_output?.result ?? resp.data?.logs ?? '';
 }
 
 /**
