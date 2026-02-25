@@ -264,16 +264,42 @@ _catalystops_errors = []
 
 def _catalystops_get_cluster_info():
     """Collect cluster info from SparkContext."""
+    def _safe_int(val, default=0):
+        try:
+            return int(float(str(val))) if val and str(val).strip() else default
+        except (ValueError, TypeError):
+            return default
+
     try:
         sc = spark.sparkContext
         conf = sc.getConf()
-        _workers = int(conf.get("spark.executor.instances", "0"))
-        _cores_per = int(conf.get("spark.executor.cores", "1"))
+        _workers   = _safe_int(conf.get("spark.executor.instances", "0"))
+        _cores_per = _safe_int(conf.get("spark.executor.cores", "0"))
+
+        # Serverless / dynamic allocation: executor.instances is 0 or absent.
+        # Fall back to dynamic allocation max, then clusterMaxWorkers tag.
+        if _workers == 0:
+            _workers = _safe_int(conf.get("spark.dynamicAllocation.maxExecutors", "0"))
+        if _workers == 0:
+            _workers = _safe_int(conf.get("spark.databricks.clusterUsageTags.clusterMaxWorkers", "0"))
+
+        # Cores per executor: fall back to spark.default.parallelism / workers
+        if _cores_per == 0:
+            _dp = _safe_int(conf.get("spark.default.parallelism", "0"))
+            if _dp > 0 and _workers > 0:
+                _cores_per = max(1, _dp // _workers)
+            else:
+                _cores_per = 1  # minimum
+
+        # totalCores: use defaultParallelism as the ground-truth fallback (always set by Spark)
+        _total_cores = _workers * _cores_per if _workers > 0 else sc.defaultParallelism
+        _total_cores = max(_total_cores, 1)
+
         return {
             "clusterName": conf.get("spark.databricks.clusterUsageTags.clusterName", ""),
             "workers": _workers,
             "coresPerWorker": _cores_per,
-            "totalCores": max(_workers * _cores_per, 1),
+            "totalCores": _total_cores,
             "executorMemory": conf.get("spark.executor.memory", ""),
             "driverMemory": conf.get("spark.driver.memory", ""),
             "sparkVersion": sc.version,
@@ -283,8 +309,13 @@ def _catalystops_get_cluster_info():
             "sparkConfigs": dict(conf.getAll()),
         }
     except Exception:
+        # Last resort: at least return a non-zero totalCores so cost estimation works
+        try:
+            _dp = spark.sparkContext.defaultParallelism
+        except Exception:
+            _dp = 1
         return {
-            "workers": 0, "coresPerWorker": 0, "totalCores": 0,
+            "workers": 0, "coresPerWorker": 0, "totalCores": max(_dp, 1),
             "executorMemory": "", "driverMemory": "", "sparkVersion": "",
             "photonEnabled": False, "adaptiveQueryEnabled": False, "sparkConfigs": {},
         }
@@ -555,8 +586,29 @@ def _catalystops_get_table_stats(plan_texts):
             except Exception:
                 pass
 
+        # ── Fallback: DESCRIBE EXTENDED — works for Hive/UC tables without Delta ─
         if _used_quoted is None:
-            # Table not accessible via DESCRIBE DETAIL — skip
+            for _quoted, _parts in _try_quoted(_tbl):
+                try:
+                    _ext_rows = spark.sql(f"DESCRIBE EXTENDED {_quoted}").collect()
+                    # Extract format from "Provider" or "Type" row
+                    for _row in _ext_rows:
+                        _cn = str(_row.get('col_name', '') or '').strip()
+                        _dt = str(_row.get('data_type', '') or '').strip()
+                        if _cn in ('Provider', 'Type'):
+                            _fmt = _dt
+                        elif _cn == 'Statistics':
+                            # "Statistics" row: "X bytes, Y rows"
+                            _bm = _re_t.search(r'([\d,]+)\s+bytes', _dt)
+                            if _bm:
+                                _size_bytes = int(_bm.group(1).replace(',', ''))
+                    _used_quoted = _quoted
+                    break
+                except Exception:
+                    pass
+
+        if _used_quoted is None:
+            # Table not accessible — skip
             continue
 
         # ── Row count: try existing stats first ────────────────────────────────

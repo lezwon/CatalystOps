@@ -39,7 +39,7 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
 
         // ── Join type detection ────────────────────────────────────────────────
 
-        if (/BroadcastHashJoin/i.test(trimmed)) {
+        if (/BroadcastHashJoin/i.test(trimmed) || /PhotonBroadcastHashJoin/i.test(trimmed)) {
             issues.push({
                 type: 'join',
                 name: 'BroadcastHashJoin',
@@ -67,7 +67,7 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
                 }
             }
 
-        } else if (/SortMergeJoin/i.test(trimmed)) {
+        } else if (/SortMergeJoin/i.test(trimmed) || /PhotonSortMergeJoin/i.test(trimmed)) {
             issues.push({
                 type: 'join',
                 name: 'SortMergeJoin',
@@ -96,7 +96,7 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
                 });
             }
 
-        } else if (/ShuffledHashJoin/i.test(trimmed)) {
+        } else if (/ShuffledHashJoin/i.test(trimmed) || /PhotonShuffledHashJoin/i.test(trimmed)) {
             issues.push({
                 type: 'join',
                 name: 'ShuffledHashJoin',
@@ -131,7 +131,8 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
 
         // ── Shuffle (Exchange) detection ───────────────────────────────────────
 
-        if (/\bExchange\b/i.test(trimmed) && !/BroadcastExchange/i.test(trimmed)) {
+        if ((/\bExchange\b/i.test(trimmed) && !/BroadcastExchange/i.test(trimmed)) ||
+            /PhotonShuffleExchange(?:Sink|Source)/i.test(trimmed)) {
             issues.push({
                 type: 'shuffle',
                 name: 'Exchange',
@@ -195,7 +196,7 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
 
         // ── Table name extraction (used by RepeatedFileScan and other detectors) ─
 
-        const fileScanMatch = trimmed.match(/FileScan\s+(?:parquet|delta|orc|json|csv)\s+([\w.]+)/i);
+        const fileScanMatch = trimmed.match(/(?:FileScan|PhotonScan)\s+(?:parquet|delta|orc|json|csv)\s+([\w.]+)/i);
         const hiveScanMatch = trimmed.match(/HiveTableScan\s+.*?\s+([\w.]+)/i);
         const scannedTable = fileScanMatch?.[1] || hiveScanMatch?.[1];
         if (scannedTable) {
@@ -311,7 +312,7 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
 
         // ── CSV / text format reads ────────────────────────────────────────────
 
-        if (/FileScan\s+(csv|text)\b/i.test(trimmed) ||
+        if (/(?:FileScan|PhotonScan)\s+(csv|text)\b/i.test(trimmed) ||
             /Format:\s*(CSV|Text)\b/i.test(trimmed) ||
             (/\bScan\b/i.test(trimmed) && /\.csv\b/i.test(trimmed))) {
             issues.push({
@@ -400,6 +401,7 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
 
 /** Parse a "sizeInBytes=X Unit" string from plan text into bytes. */
 function parseSizeBytes(text: string): number | null {
+    // Matches both Statistics(sizeInBytes=X Unit) and Statistics: sizeInBytes=X Unit
     const m = text.match(/sizeInBytes=([\d.]+)\s*(B|KiB|MiB|GiB|TiB)/i);
     if (!m) { return null; }
     const val = parseFloat(m[1]);
@@ -468,12 +470,12 @@ function findSmallSide(segment: string): number | null {
 
 /** Extract a stable table/path identifier from a FileScan line. */
 function extractFileScanPath(trimmed: string): string | null {
-    // Format 1: FileScan parquet schema.table[columns...]
-    const tableMatch = trimmed.match(/FileScan\s+\w+\s+([\w.]+)\s*\[/i);
+    // Format 1: FileScan/PhotonScan parquet schema.table[columns...]
+    const tableMatch = trimmed.match(/(?:FileScan|PhotonScan)\s+\w+\s+([\w.]+)\s*\[/i);
     if (tableMatch) { return tableMatch[1]; }
 
     // Format 2: FileScan csv [/path/to/file.csv, ...][columns...]
-    const pathMatch = trimmed.match(/FileScan\s+\w+\s+\[([^[\]]+)\]/i);
+    const pathMatch = trimmed.match(/(?:FileScan|PhotonScan)\s+\w+\s+\[([^[\]]+)\]/i);
     if (pathMatch) {
         const first = pathMatch[1].split(',')[0].trim().replace(/^file:/i, '');
         const parts = first.replace(/\\/g, '/').split('/').filter(Boolean);

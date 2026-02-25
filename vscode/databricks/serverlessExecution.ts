@@ -133,11 +133,19 @@ interface JobRunGetResponse {
         life_cycle_state?: string;
         result_state?: string;
     };
+    run_page_url?: string;
+}
+
+export interface PollJobRunResult {
+    outcome: JobRunOutcome;
+    /** Direct link to the run in the Databricks UI, e.g. https://host/#job/.../run/... */
+    runPageUrl?: string;
 }
 
 /**
  * Poll a job run until it reaches a terminal state or times out.
  * Uses the same exponential backoff as pollCommand.
+ * Returns the outcome and the Databricks UI run URL.
  */
 export async function pollJobRun(
     host: string,
@@ -145,10 +153,11 @@ export async function pollJobRun(
     runId: string,
     onProgress: (elapsedMs: number) => void,
     timeoutMs: number = POLLING.timeoutMs,
-): Promise<JobRunOutcome> {
+): Promise<PollJobRunResult> {
     const start = Date.now();
     const deadline = start + timeoutMs;
     let delay: number = POLLING.initialDelayMs;
+    let runPageUrl: string | undefined;
 
     const NON_TERMINAL = new Set(['PENDING', 'RUNNING', 'TERMINATING']);
 
@@ -158,16 +167,21 @@ export async function pollJobRun(
             path: `/api/2.0/jobs/runs/get?run_id=${runId}`,
         });
 
+        // Capture the run page URL from the first response that has it
+        if (!runPageUrl && resp.data?.run_page_url) {
+            runPageUrl = resp.data.run_page_url;
+        }
+
         const lifeCycleState = resp.data?.state?.life_cycle_state ?? '';
         const resultState = resp.data?.state?.result_state ?? '';
 
         if (!NON_TERMINAL.has(lifeCycleState)) {
             // Terminal state reached
             if (lifeCycleState === 'TERMINATED') {
-                return resultState === 'SUCCESS' ? 'SUCCESS' : 'FAILED';
+                return { outcome: resultState === 'SUCCESS' ? 'SUCCESS' : 'FAILED', runPageUrl };
             }
             // INTERNAL_ERROR or SKIPPED
-            return 'FAILED';
+            return { outcome: 'FAILED', runPageUrl };
         }
 
         onProgress(Date.now() - start);
@@ -177,7 +191,7 @@ export async function pollJobRun(
 
     // Timeout — attempt to cancel best-effort
     await cancelJobRun(host, token, runId);
-    return 'TIMEOUT';
+    return { outcome: 'TIMEOUT', runPageUrl };
 }
 
 interface JobRunOutputResponse {
