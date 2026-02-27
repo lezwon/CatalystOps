@@ -1,6 +1,6 @@
 # CatalystOps — PySpark Optimizer
 
-**CatalystOps** catches PySpark performance issues before they hit production. It detects **30+ anti-patterns** locally in real time and runs **safe dry-run analysis** on a Databricks cluster or serverless compute to inspect Catalyst execution plans — all without executing Spark jobs or touching your data. Plan parsing is fully **Photon-aware** and detects cross-DataFrame repeated scans across your entire script.
+**CatalystOps** catches PySpark performance issues before they hit production. It detects **30+ anti-patterns** locally in real time, validates **column names and types against your schema** at edit time, and runs **safe dry-run analysis** on a Databricks cluster or serverless compute to inspect Catalyst execution plans — all without executing Spark jobs or touching your data. Plan parsing is fully **Photon-aware** and detects cross-DataFrame repeated scans across your entire script.
 
 > **Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=CatalystOps.catalystops)**
 
@@ -28,10 +28,75 @@ Detects anti-patterns instantly via regex-based pattern matching with full comme
 | Severity | Checks |
 |----------|--------|
 | **Critical** | `collect()`, `crossJoin()`, SQL injection via f-strings in `spark.sql()` |
-| **Warning** | UDFs, `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `dropDuplicates` on streaming DataFrame (cross-batch stateful dedup), `withColumn` in loops, non-deterministic UDFs in UDFs, deprecated pandas `.append()`, `.rdd` conversion, unnecessary `count()`, `checkpoint()` (triggers HDFS write) |
+| **Warning** | UDFs, `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `dropDuplicates` on streaming DataFrame (cross-batch stateful dedup), `withColumn` in loops, non-deterministic UDFs in UDFs, deprecated pandas `.append()`, `.rdd` conversion, unnecessary `count()`, `checkpoint()` (triggers HDFS write), **unknown column names**, **type mismatches** |
 | **Info** | Schema inference, chained `.filter()`, `show()` in production, `display()` in production, `cache()` without `unpersist()`, `select("*")`, global `orderBy`, missing write mode, `pandas_udf`, `to_pandas_on_spark()`, `Table May Lack Statistics` |
 
 Each issue shows a **one-line explanation** and a **quick fix code block** on hover.
+
+---
+
+### Schema Validation (No Cluster Required)
+
+When a `StructType` or DDL schema is defined in the same file, CatalystOps validates column references and function types at edit time — before code ever runs on a cluster.
+
+**Supported schema definition styles:**
+
+```python
+# StructType
+schema = StructType([
+    StructField("user_id", IntegerType()),
+    StructField("name", StringType()),
+])
+
+# DDL string
+schema = "user_id INT, name STRING, ts TIMESTAMP"
+```
+
+**Supported DataFrame creation patterns:**
+
+```python
+df = spark.createDataFrame(data, schema)
+df = spark.createDataFrame(data, schema=schema)
+df = spark.createDataFrame(data, "user_id INT, name STRING")
+df = spark.read.schema(schema).parquet(path)
+df = spark.readStream.schema(schema).json(path)
+```
+
+**What gets checked:**
+
+| Check | Issue ID | Example |
+|-------|----------|---------|
+| Unknown column name | `SCHEMA_COL_001` | `df.select("usr_id")` when schema has `"user_id"` |
+| Type mismatch — numeric function on non-numeric column | `SCHEMA_TYPE_001` | `F.sum("name")` where `name` is `StringType` |
+| Type mismatch — string function on non-string column | `SCHEMA_TYPE_001` | `F.upper("created_at")` where `created_at` is `TimestampType` |
+| Type mismatch — date function on non-date column | `SCHEMA_TYPE_001` | `F.year("name")` where `name` is `StringType` |
+
+Column references are checked in `.select()`, `.drop()`, `.groupBy()`, `.orderBy()`, `.sort()`, `.partitionBy()`, `.withColumnRenamed()`, `col("name")`, and `df["name"]` expressions.
+
+**Schema propagation** — schemas flow through transformations:
+
+```python
+df2 = df.filter("active = true")         # same schema as df
+df3 = df.select("user_id", "name")       # subset: only user_id, name
+df4 = df.drop("name")                    # name removed
+df5 = df.withColumn("score", ...)        # score added (type = unknown)
+df6 = df.withColumnRenamed("name", "full_name")  # renamed
+df7 = df.join(other, "id")              # schema unknown — no false positives
+```
+
+**"Did you mean?" suggestions** — when a column name is wrong, CatalystOps suggests the closest match:
+
+```
+Column "usr_id" not found in schema of "df". Did you mean: "user_id"?
+```
+
+**Suppression** — add `# noqa: catalystops` to skip a line:
+
+```python
+df.select("legacy_col")  # noqa: catalystops
+```
+
+> Schema validation only fires when a schema is defined in the **same file**. DataFrames loaded from external sources (`spark.table()`, `spark.sql()`, `spark.read` without `.schema()`) are silently skipped — no false positives.
 
 ---
 
@@ -246,7 +311,14 @@ Local `.py` files imported by your script are automatically detected and bundled
 ┌─────────────────┐     ┌──────────────────────┐
 │  Python file     │────▶│  Local Code Analyzer  │──▶ 30+ anti-pattern checks
 │  (active editor) │     │  (codeAnalyzer.ts)    │    with line/column positions
-└─────────────────┘     └──────────────────────┘
+└─────────────────┘     └──────────┬───────────┘
+                                   │
+                         ┌─────────▼───────────┐
+                         │  Schema Validator    │──▶ column-name + type checks
+                         │  schemaExtractor.ts  │    StructType / DDL schemas
+                         │  schemaTracker.ts    │    propagated through transforms
+                         │  schemaValidator.ts  │    SCHEMA_COL_001 / TYPE_001
+                         └─────────────────────┘
         │
         ▼  (if Databricks configured)
 ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────────────┐
@@ -312,6 +384,9 @@ catalyst-ops/
 │   ├── logger.ts                 # Output channel logger (debug-gated for diagnostics)
 │   ├── analysis/
 │   │   ├── codeAnalyzer.ts       # 30+ anti-pattern definitions + regex scanner
+│   │   ├── schemaExtractor.ts    # Parses StructType / DDL schemas from source
+│   │   ├── schemaTracker.ts      # Propagates schemas through DF transformations
+│   │   ├── schemaValidator.ts    # Column-name + type checks (SCHEMA_COL/TYPE_001)
 │   │   ├── planParser.ts         # Catalyst plan → join/shuffle/cache/scan issues
 │   │   ├── costModel.ts          # Heuristic cost scoring and DBU estimation
 │   │   ├── clusterScript.ts      # Script generation, local file bundling, plan capture
@@ -338,7 +413,8 @@ catalyst-ops/
 │   └── suite/
 │       ├── codeAnalyzer.test.ts
 │       ├── planParser.test.ts
-│       └── safetyWrapper.test.ts
+│       ├── safetyWrapper.test.ts
+│       └── schemaValidator.test.ts
 └── media/
     └── icon.svg
 ```

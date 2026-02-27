@@ -4,6 +4,7 @@
  */
 
 import { CodeIssue, Severity, IssueCategory, Fix } from '../models/types';
+import { validateSchema } from './schemaValidator';
 
 interface CodePattern {
     id: string;
@@ -543,6 +544,10 @@ streaming_df \\
             });
         }
     }
+
+    // Schema validation: column name and type checks
+    const schemaIssues = validateSchema(code);
+    issues.push(...schemaIssues);
 
     return issues;
 }
