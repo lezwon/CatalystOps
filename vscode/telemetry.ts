@@ -57,10 +57,14 @@ export async function maybeShowDryRunNudge(issueCount: number): Promise<void> {
         if (!_context) { return; }
         if (_context.globalState.get<boolean>(HAS_USED_DRY_RUN_KEY)) { return; }
         const label = `CatalystOps found ${issueCount} issue${issueCount !== 1 ? 's' : ''}. Try a deep Catalyst plan analysis on Databricks to catch shuffle, join, and scan issues that only appear at runtime.`;
+        sendEvent('dryrun_nudge/shown', { issueCount: String(issueCount) });
         const choice = await vscode.window.showInformationMessage(label, 'Try Dry Run (⌘⇧K)', 'Not now');
         if (choice === 'Try Dry Run (⌘⇧K)') {
             sendEvent('dryrun_nudge/clicked');
             vscode.commands.executeCommand('catalystops.analyzeCost');
+        } else {
+            // undefined = toast closed without clicking; 'Not now' = explicit dismiss
+            sendEvent('dryrun_nudge/dismissed', { action: choice === 'Not now' ? 'not_now' : 'closed' });
         }
     }, 2000);
 }
