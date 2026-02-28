@@ -391,6 +391,53 @@ df = spark.createDataFrame(data, schema)
         assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_COL_001').length, 0,
             'literal arg to locate should not be flagged as unknown column');
     });
+
+    test('F.explode on a non-array column is flagged', () => {
+        const code = `
+from pyspark.sql.types import StructType, StructField, StringType, ArrayType
+schema = StructType([StructField("name", StringType()), StructField("tags", ArrayType(StringType()))])
+df = spark.createDataFrame(data, schema)
+df.select(F.explode("name"))
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(issues.some(i => i.id === 'SCHEMA_TYPE_001' && i.description.includes('"name"')),
+            'explode on a string column should be flagged as SCHEMA_TYPE_001');
+    });
+
+    test('F.explode on an array column passes', () => {
+        const code = `
+from pyspark.sql.types import StructType, StructField, StringType, ArrayType
+schema = StructType([StructField("name", StringType()), StructField("tags", ArrayType(StringType()))])
+df = spark.createDataFrame(data, schema)
+df.select(F.explode("tags"))
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(i => i.id === 'SCHEMA_TYPE_001'), 'explode on an array column should not be flagged');
+    });
+
+    test('F.explode_outer on a non-array column is flagged', () => {
+        const code = `
+from pyspark.sql.types import StructType, StructField, IntegerType, ArrayType
+schema = StructType([StructField("amount", IntegerType()), StructField("items", ArrayType(IntegerType()))])
+df = spark.createDataFrame(data, schema)
+df.select(F.explode_outer("amount"))
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(issues.some(i => i.id === 'SCHEMA_TYPE_001' && i.description.includes('"amount"')),
+            'explode_outer on a non-array column should be flagged');
+    });
+
+    test('F.explode on unknown column emits SCHEMA_COL_001 not SCHEMA_TYPE_001', () => {
+        const code = `
+from pyspark.sql.types import StructType, StructField, StringType, ArrayType
+schema = StructType([StructField("tags", ArrayType(StringType()))])
+df = spark.createDataFrame(data, schema)
+df.select(F.explode("typo_col"))
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(issues.some(i => i.id === 'SCHEMA_COL_001'), 'unknown column in explode should emit SCHEMA_COL_001');
+        assert.ok(!issues.some(i => i.id === 'SCHEMA_TYPE_001'), 'should not emit type error for unknown column');
+    });
 });
 
 // ── 5. Schema Propagation ─────────────────────────────────────────────────────

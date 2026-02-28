@@ -4,7 +4,7 @@
 
 <h1 align="center">CatalystOps — PySpark Optimizer</h1>
 
-**CatalystOps** catches PySpark performance issues before they hit production. It detects **30+ anti-patterns** locally in real time, validates **column names, types, and schema alignment** at edit time, estimates **notebook compute costs** from source annotations, and runs **safe dry-run analysis** on a Databricks cluster or serverless compute to inspect Catalyst execution plans — all without executing Spark jobs or touching your data. Plan parsing is fully **Photon-aware** and detects cross-DataFrame repeated scans across your entire script.
+**CatalystOps** catches PySpark performance issues before they hit production. It detects **35+ anti-patterns** locally in real time, validates **column names, types, and schema alignment** at edit time, estimates **notebook compute costs** from source annotations, and runs **safe dry-run analysis** on a Databricks cluster or serverless compute to inspect Catalyst execution plans — all without executing Spark jobs or touching your data. Plan parsing is fully **Photon-aware** and detects cross-DataFrame repeated scans across your entire script.
 
 > **Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=CatalystOps.catalystops)**
 
@@ -33,8 +33,8 @@ Detects anti-patterns instantly via regex-based pattern matching with full comme
 | Severity | Checks |
 |----------|--------|
 | **Critical** | `collect()`, `crossJoin()`, SQL injection via f-strings in `spark.sql()` |
-| **Warning** | `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `dropDuplicates` on streaming DataFrame (cross-batch stateful dedup), `withColumn` in loops, non-deterministic UDFs in UDFs, deprecated pandas `.append()`, `.rdd` conversion, unnecessary `count()`, `checkpoint()` (triggers HDFS write), **unknown column names**, **type mismatches** |
-| **Info** | UDF usage, schema inference, chained `.filter()`, `show()` in production, `display()` in production, `cache()` without `unpersist()`, `select("*")`, global `orderBy`, missing write mode, `pandas_udf`, `to_pandas_on_spark()`, `Table May Lack Statistics` |
+| **Warning** | `collect()` on streaming (cross-batch stateful dedup), `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `withColumn` in loops, `.rdd` conversion, `checkpoint()`, source DataFrame used 2+ times without caching, `Window.orderBy()` without `partitionBy` (global window), AQE disabled via `spark.conf.set`, deprecated pandas `.append()`, non-deterministic UDFs, **unknown column names**, **type mismatches** (numeric / string / date / array functions on wrong column type) |
+| **Info** | UDF usage, schema inference, chained `.filter()`, `show()` / `display()` in production, `cache()` without `unpersist()`, `select("*")`, global `orderBy`, missing write mode, `pandas_udf`, `to_pandas_on_spark()`, static partition overwrite without dynamic config, `Table May Lack Statistics` |
 
 Each issue shows a **one-line explanation** and a **quick fix code block** on hover.
 
@@ -75,6 +75,7 @@ df = spark.readStream.schema(schema).json(path)
 | Type mismatch — numeric function on non-numeric column | `SCHEMA_TYPE_001` | `F.sum("name")` where `name` is `StringType` |
 | Type mismatch — string function on non-string column | `SCHEMA_TYPE_001` | `F.upper("created_at")` where `created_at` is `TimestampType` |
 | Type mismatch — date function on non-date column | `SCHEMA_TYPE_001` | `F.year("name")` where `name` is `StringType` |
+| Type mismatch — array function on non-array column | `SCHEMA_TYPE_001` | `F.explode("name")` where `name` is `StringType` |
 
 Column references are checked in `.select()`, `.drop()`, `.groupBy()`, `.orderBy()`, `.sort()`, `.partitionBy()`, `.withColumnRenamed()`, `col("name")`, and `df["name"]` expressions.
 

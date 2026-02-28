@@ -27,8 +27,9 @@ import functionTypesJson from './functionTypes.json';
 const NUMERIC_TYPES  = new Set(['integer', 'long', 'double', 'float', 'decimal']);
 const STRING_TYPES   = new Set(['string']);
 const DATE_TYPES     = new Set(['date', 'timestamp']);
+const ARRAY_TYPES    = new Set(['array']);
 
-type FunctionCategory = 'numeric' | 'string' | 'date';
+type FunctionCategory = 'numeric' | 'string' | 'date' | 'array';
 
 /** Map from PySpark function name → required column type category, loaded from functionTypes.json. */
 const FUNC_TYPES = new Map<string, FunctionCategory>(
@@ -40,6 +41,7 @@ const FUNC_TYPES = new Map<string, FunctionCategory>(
 const NUMERIC_FUNCS = new Set([...FUNC_TYPES.entries()].filter(([, v]) => v === 'numeric').map(([k]) => k));
 const STRING_FUNCS  = new Set([...FUNC_TYPES.entries()].filter(([, v]) => v === 'string').map(([k]) => k));
 const DATE_FUNCS    = new Set([...FUNC_TYPES.entries()].filter(([, v]) => v === 'date').map(([k]) => k));
+const ARRAY_FUNCS   = new Set([...FUNC_TYPES.entries()].filter(([, v]) => v === 'array').map(([k]) => k));
 
 // ── Fast-exit guard ───────────────────────────────────────────────────────────
 
@@ -107,12 +109,14 @@ const CATEGORY_TYPE_LIST: Record<string, string> = {
     numeric:        'integer, long, double, float, or decimal',
     string:         'string',
     'date/timestamp': 'date or timestamp',
+    array:          'array',
 };
 
 const CATEGORY_CAST_TYPE: Record<string, string> = {
     numeric:          'LongType()',
     string:           'StringType()',
     'date/timestamp': 'TimestampType()',
+    array:            'ArrayType(<element_type>)',
 };
 
 function makeTypeIssue(
@@ -479,6 +483,8 @@ function checkTypedFunctions(
                 issues.push(makeTypeIssue(colName, funcName, field.type, 'string', reportLine, m.index));
             } else if (DATE_FUNCS.has(funcName) && !DATE_TYPES.has(field.type)) {
                 issues.push(makeTypeIssue(colName, funcName, field.type, 'date/timestamp', reportLine, m.index));
+            } else if (ARRAY_FUNCS.has(funcName) && !ARRAY_TYPES.has(field.type)) {
+                issues.push(makeTypeIssue(colName, funcName, field.type, 'array', reportLine, m.index));
             }
         }
     }

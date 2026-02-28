@@ -259,7 +259,7 @@ df.withColumn("result", F.sqrt(F.col("value")))`,
         id: 'CODE_TOPANDAS_SPARK_001',
         name: 'to_pandas_on_spark() Conversion',
         pattern: /\.to_pandas_on_spark\s*\(\s*\)|\.pandas_api\s*\(\s*\)/g,
-        severity: Severity.WARNING,
+        severity: Severity.INFO,
         category: IssueCategory.CODE,
         description: 'Converting Spark DataFrame to pandas-on-Spark API can introduce subtle performance issues and API inconsistencies',
         fix: {
@@ -303,33 +303,6 @@ display(df)
 # Write to storage or log:
 df.write.parquet("output_path")
 logger.info(f"Row count: {df.count()}")`,
-        },
-    },
-    {
-        id: 'CODE_WITHCOL_LOOP_001',
-        name: 'withColumn in Loop',
-        pattern: /for\s+\w+\s+in\s+.+:\s*\n(?:[^\n]*\n)*?\s*(?:\w+\s*=\s*\w+\.withColumn|\.withColumn)/gm,
-        severity: Severity.WARNING,
-        category: IssueCategory.CODE,
-        description: 'Calling withColumn() inside a loop creates a new DataFrame per iteration, leading to deeply nested query plans that cause StackOverflow errors and poor performance',
-        fix: {
-            description: 'Use select() with a list of column expressions, or functools.reduce to batch column operations',
-            code: `# Instead of:
-for col_name in columns:
-    df = df.withColumn(col_name, F.upper(F.col(col_name)))
-
-# Use select with list comprehension:
-df = df.select([
-    F.upper(F.col(c)).alias(c) if c in columns else F.col(c)
-    for c in df.columns
-])
-
-# Or use functools.reduce:
-from functools import reduce
-df = reduce(
-    lambda d, c: d.withColumn(c, F.upper(F.col(c))),
-    columns, df
-)`,
         },
     },
     {
@@ -435,6 +408,22 @@ df.cache()
 
 # Local checkpoint (no HDFS write, faster than checkpoint()):
 df.localCheckpoint()`,
+        },
+    },
+    {
+        id: 'CODE_AQE_001',
+        name: 'Adaptive Query Execution Disabled',
+        pattern: /spark\.conf\.set\s*\(\s*["']spark\.sql\.adaptive\.enabled["']\s*,\s*(?:["']false["']|False)\s*\)/gi,
+        severity: Severity.WARNING,
+        category: IssueCategory.CODE,
+        description: 'Adaptive Query Execution (AQE) is disabled. AQE dynamically re-optimises query plans at runtime — coalescing small shuffle partitions, handling join skew, and switching join strategies — and should remain enabled in production.',
+        fix: {
+            description: 'Remove the override to keep AQE enabled (it is on by default in Spark 3.x)',
+            code: `# Remove or flip the override:
+# spark.conf.set("spark.sql.adaptive.enabled", "false")  # ← remove this line
+
+# AQE is enabled by default in Spark 3.x.
+# Only disable it temporarily for debugging plan regressions.`,
         },
     },
     {
@@ -561,6 +550,240 @@ streaming_df \\
                 endLine: lineNum,
                 endColumn: column + sdm[0].length,
                 location: `Line ${lineNum + 1}`,
+            });
+        }
+    }
+
+    // Window without partitionBy: Window.orderBy(...) with no partitionBy creates a
+    // global window — all rows are sorted into a single partition, causing OOM and
+    // extreme slowness on large DataFrames.
+    {
+        const winRe = /\bWindow\.orderBy\s*\(/g;
+        let wm: RegExpExecArray | null;
+        while ((wm = winRe.exec(code)) !== null) {
+            const offset = wm.index;
+            const lineNum = code.substring(0, offset).split('\n').length - 1;
+            const lineStart = code.lastIndexOf('\n', offset - 1) + 1;
+            const column = offset - lineStart;
+            const lineText = lines[lineNum] ?? '';
+            if (isInsideComment(lineText, column)) { continue; }
+            if (/# noqa: catalystops\b/i.test(lineText)) { continue; }
+
+            // Look back up to 5 lines to collect the full logical statement
+            // (handles multi-line window specs with backslash / paren continuation).
+            const ctxStart = Math.max(0, lineNum - 5);
+            const ctxText = lines.slice(ctxStart, lineNum + 1).join('\n');
+            if (/\.partitionBy\s*\(/.test(ctxText)) { continue; }
+
+            issues.push({
+                id: 'CODE_WINDOW_001',
+                severity: Severity.WARNING,
+                category: IssueCategory.CODE,
+                title: 'Window.orderBy() without partitionBy — global window',
+                description: 'Window.orderBy() without partitionBy() creates a global window that moves ALL rows to a single partition for sorting. This causes executor OOM and loses all parallelism on large DataFrames.',
+                fix: {
+                    description: 'Add partitionBy() to limit each window to a relevant subset of rows',
+                    code: `# Instead of:
+w = Window.orderBy("timestamp")           # global — all data in one partition
+
+# Use partitionBy to scope the window:
+w = Window.partitionBy("user_id").orderBy("timestamp")
+
+# If you genuinely need a global rank, repartition first to avoid silent skew:
+df = df.repartition(1)
+w = Window.orderBy("value")`,
+                },
+                line: lineNum,
+                column,
+                endLine: lineNum,
+                endColumn: column + wm[0].length,
+                location: `Line ${lineNum + 1}`,
+            });
+        }
+    }
+
+    // Dynamic partition overwrite: writing with mode("overwrite") + partitionBy()
+    // without spark.sql.sources.partitionOverwriteMode = dynamic replaces the entire
+    // table on every run instead of only the affected partitions.
+    if (!/partitionOverwriteMode["']\s*,\s*["']dynamic/i.test(code)) {
+        // Match .write.mode("overwrite") ... .partitionBy( on the same logical statement
+        // (check within an 8-line window to handle chained multi-line writes).
+        const modeRe = /\.mode\s*\(\s*["']overwrite["']\s*\)/g;
+        let mm: RegExpExecArray | null;
+        while ((mm = modeRe.exec(code)) !== null) {
+            const offset = mm.index;
+            const lineNum = code.substring(0, offset).split('\n').length - 1;
+            const lineStart = code.lastIndexOf('\n', offset - 1) + 1;
+            const column = offset - lineStart;
+            const lineText = lines[lineNum] ?? '';
+            if (isInsideComment(lineText, column)) { continue; }
+            if (/# noqa: catalystops\b/i.test(lineText)) { continue; }
+
+            // Collect the logical write chain (up to 8 lines around the match)
+            const ctxStart = Math.max(0, lineNum - 4);
+            const ctxEnd = Math.min(lines.length - 1, lineNum + 4);
+            const ctxText = lines.slice(ctxStart, ctxEnd + 1).join('\n');
+            if (!/\.write\b/.test(ctxText)) { continue; }
+            if (!/\.partitionBy\s*\(/.test(ctxText)) { continue; }
+
+            issues.push({
+                id: 'CODE_DYN_PART_001',
+                severity: Severity.INFO,
+                category: IssueCategory.CODE,
+                title: 'Static partition overwrite — consider dynamic partition overwrite',
+                description: 'write.mode("overwrite").partitionBy(...) replaces the entire table by default. With static overwrite, even unrelated partitions are deleted. Enable dynamic partition overwrite to rewrite only the partitions present in the DataFrame.',
+                fix: {
+                    description: 'Enable dynamic partition overwrite so only affected partitions are replaced',
+                    code: `# Enable dynamic partition overwrite (once, at session start):
+spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+
+# Then your write stays the same:
+df.write.mode("overwrite").partitionBy("date").parquet("path")
+# Only partitions whose "date" values appear in df are overwritten.`,
+                },
+                line: lineNum,
+                column,
+                endLine: lineNum,
+                endColumn: column + mm[0].length,
+                location: `Line ${lineNum + 1}`,
+            });
+        }
+    }
+
+    // withColumn-in-loop check: scan line by line to confirm .withColumn() is
+    // actually inside the for-loop body (indented deeper than the `for` line).
+    // The previous regex approach incorrectly fired on any for-loop when .withColumn
+    // appeared anywhere later in the file.
+    {
+        const forRe = /^([ \t]*)for\s+\w+\s+in\s+[^:\n]+:/;
+        for (let i = 0; i < lines.length; i++) {
+            const forMatch = forRe.exec(lines[i]);
+            if (!forMatch) { continue; }
+            if (isInsideComment(lines[i], lines[i].indexOf('for'))) { continue; }
+            if (/# noqa: catalystops\b/i.test(lines[i])) { continue; }
+
+            const forIndent = forMatch[1].length;
+            // Scan the body: lines that are indented more than the `for` line
+            for (let j = i + 1; j < lines.length; j++) {
+                const bodyLine = lines[j];
+                // Blank lines are allowed inside loop bodies
+                if (bodyLine.trim() === '') { continue; }
+                // Count leading whitespace of this line
+                const bodyIndent = (bodyLine.match(/^([ \t]*)/) ?? ['', ''])[1].length;
+                // Dedented back to `for` level or beyond — we've left the loop body
+                if (bodyIndent <= forIndent) { break; }
+                // Check for .withColumn( on this body line (not in a comment)
+                const wcIdx = bodyLine.indexOf('.withColumn(');
+                if (wcIdx === -1) { continue; }
+                if (isInsideComment(bodyLine, wcIdx)) { continue; }
+
+                issues.push({
+                    id: 'CODE_WITHCOL_LOOP_001',
+                    severity: Severity.WARNING,
+                    category: IssueCategory.CODE,
+                    title: 'withColumn in Loop',
+                    description: 'Calling withColumn() inside a loop creates a new DataFrame per iteration, leading to deeply nested query plans that cause StackOverflow errors and poor performance',
+                    fix: {
+                        description: 'Use select() with a list of column expressions, or functools.reduce to batch column operations',
+                        code: `# Instead of:
+for col_name in columns:
+    df = df.withColumn(col_name, F.upper(F.col(col_name)))
+
+# Use select with list comprehension:
+df = df.select([
+    F.upper(F.col(c)).alias(c) if c in columns else F.col(c)
+    for c in df.columns
+])
+
+# Or use functools.reduce:
+from functools import reduce
+df = reduce(
+    lambda d, c: d.withColumn(c, F.upper(F.col(c))),
+    columns, df
+)`,
+                    },
+                    line: i,
+                    column: lines[i].indexOf('for'),
+                    endLine: i,
+                    endColumn: lines[i].length,
+                    location: `Line ${i + 1}`,
+                });
+                break; // one issue per loop, first withColumn found
+            }
+        }
+    }
+
+    // Repeated source scan detection: a DataFrame read from a source
+    // (spark.read.*, spark.table(), spark.sql(), spark.createDataFrame()) that is
+    // referenced 2+ times without .cache()/.persist() before the second use will
+    // trigger a full re-scan of the underlying data for each use.
+    {
+        const srcRe = /^[ \t]*(\w+)\s*=\s*(?:\w+\.read\.|\bspark\.table\s*\(|\bspark\.sql\s*\(|\bspark\.createDataFrame\s*\()/gm;
+        let sm: RegExpExecArray | null;
+        while ((sm = srcRe.exec(code)) !== null) {
+            const varName = sm[1];
+            const defOffset = sm.index;
+            const defLine = code.substring(0, defOffset).split('\n').length - 1;
+            const defLineText = lines[defLine] ?? '';
+            const defLineStart = code.lastIndexOf('\n', defOffset - 1) + 1;
+            const defCol = defOffset - defLineStart;
+            if (defLineText.trim().startsWith('#')) { continue; }
+            if (/# noqa: catalystops\b/i.test(defLineText)) { continue; }
+
+            const refRe = new RegExp(`\\b${varName}\\b`);
+            const reDefRe = new RegExp(`^[ \\t]*${varName}\\s*=\\s*(?:\\w+\\.read\\.|\\bspark\\.table\\s*\\(|\\bspark\\.sql\\s*\\(|\\bspark\\.createDataFrame\\s*\\()`);
+            const lazyRe = new RegExp(`^[ \\t]*${varName}\\s*=\\s*${varName}\\b`);
+            const cacheRe = new RegExp(`\\b${varName}\\b\\.(?:cache|persist)\\s*\\(`);
+
+            const refLines: number[] = [];
+            let cacheFoundLine = -1;
+
+            for (let i = defLine + 1; i < lines.length; i++) {
+                const lineText = lines[i];
+                if (lineText.trim() === '' || lineText.trim().startsWith('#')) { continue; }
+                if (/# noqa: catalystops\b/i.test(lineText)) { continue; }
+
+                // Var is redefined from a new source — stop tracking this definition
+                if (reDefRe.test(lineText) && !lazyRe.test(lineText)) { break; }
+
+                // Detect cache/persist before checking if it's a ref
+                if (cacheFoundLine === -1 && cacheRe.test(lineText)) {
+                    cacheFoundLine = i;
+                }
+
+                // Skip lazy transformation reassignments: `varName = varName.method(...)`
+                if (lazyRe.test(lineText)) { continue; }
+
+                if (refRe.test(lineText)) {
+                    refLines.push(i);
+                }
+            }
+
+            if (refLines.length < 2) { continue; }
+
+            // If cache/persist is found before (or on) the second reference, no issue
+            const secondRefLine = refLines[1];
+            if (cacheFoundLine !== -1 && cacheFoundLine <= secondRefLine) { continue; }
+
+            issues.push({
+                id: 'CODE_REPRO_001',
+                severity: Severity.WARNING,
+                category: IssueCategory.CODE,
+                title: `"${varName}" scanned ${refLines.length}× — consider caching`,
+                description: `"${varName}" is used ${refLines.length} times after being read from a source without .cache() or .persist(). Each use triggers a full re-scan of the underlying data, which can be very expensive on large datasets.`,
+                fix: {
+                    description: 'Call .cache() or .persist() immediately after reading the DataFrame',
+                    code: `${varName} = spark.read.parquet("path")
+${varName}.cache()   # materialise once — subsequent uses hit the in-memory cache
+
+# Or inline:
+${varName} = spark.read.parquet("path").cache()`,
+                },
+                line: defLine,
+                column: defCol,
+                endLine: defLine,
+                endColumn: defCol + sm[0].trimEnd().length,
+                location: `Line ${defLine + 1}`,
             });
         }
     }

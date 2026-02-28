@@ -35,6 +35,8 @@
   "degrees":             "numeric",
   "endswith":            "string",
   "exp":                 "numeric",
+  "explode":             "array",
+  "explode_outer":       "array",
   "expm1":               "numeric",
   "factorial":           "numeric",
   "floor":               "numeric",

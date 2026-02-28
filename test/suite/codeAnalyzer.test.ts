@@ -124,6 +124,45 @@ spark.sql(f"SELECT * FROM {table}")
         assert.ok(!issues.some(i => i.id === 'CODE_UNION_001'), 'should respect noqa suppression');
     });
 
+    test('should flag withColumn() inside a for loop body', () => {
+        const code = [
+            'for col_name in columns:',
+            '    df = df.withColumn(col_name, F.upper(F.col(col_name)))',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_WITHCOL_LOOP_001'), 'withColumn in loop body should be flagged');
+    });
+
+    test('should flag withColumn() deeper in a for loop body', () => {
+        const code = [
+            'for col_name in columns:',
+            '    if col_name in subset:',
+            '        df = df.withColumn(col_name, F.upper(F.col(col_name)))',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_WITHCOL_LOOP_001'), 'withColumn nested inside loop body should be flagged');
+    });
+
+    test('should NOT flag for loop when withColumn appears AFTER the loop (not inside it)', () => {
+        const code = [
+            'for item in items:',
+            '    print(item)',
+            '',
+            'df = df.withColumn("x", F.col("x"))',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_WITHCOL_LOOP_001'), 'withColumn outside loop should not be flagged');
+    });
+
+    test('should NOT flag for loop with no withColumn at all', () => {
+        const code = [
+            'for item in items:',
+            '    print(item)',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_WITHCOL_LOOP_001'), 'loop without withColumn should not be flagged');
+    });
+
     test('should not flag intersect() (no generic warning — only schema-aware check fires)', () => {
         const code = 'result = df1.intersect(df2)';
         const issues = analyzeCode(code);
@@ -134,5 +173,146 @@ spark.sql(f"SELECT * FROM {table}")
         const code = 'result = df1.except(df2)';
         const issues = analyzeCode(code);
         assert.ok(!issues.some(i => i.id === 'CODE_EXCEPT_001'), 'CODE_EXCEPT_001 removed');
+    });
+
+    // ── AQE disabled ──────────────────────────────────────────────────────────
+
+    test('CODE_AQE_001: flags spark.sql.adaptive.enabled = false (double quotes)', () => {
+        const code = 'spark.conf.set("spark.sql.adaptive.enabled", "false")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_AQE_001'), 'should flag AQE disabled');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_AQE_001')!.severity, 'warning');
+    });
+
+    test('CODE_AQE_001: flags spark.sql.adaptive.enabled = False (Python bool)', () => {
+        const code = "spark.conf.set('spark.sql.adaptive.enabled', False)";
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_AQE_001'), 'should flag Python bool False');
+    });
+
+    test('no CODE_AQE_001 when AQE is enabled', () => {
+        const code = 'spark.conf.set("spark.sql.adaptive.enabled", "true")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_AQE_001'), 'enabling AQE should not be flagged');
+    });
+
+    // ── Window without partitionBy ────────────────────────────────────────────
+
+    test('CODE_WINDOW_001: flags Window.orderBy() without partitionBy', () => {
+        const code = 'w = Window.orderBy("timestamp")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_WINDOW_001'), 'global window should be flagged');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_WINDOW_001')!.severity, 'warning');
+    });
+
+    test('CODE_WINDOW_001: flags inline Window.orderBy() in over()', () => {
+        const code = 'df.withColumn("rank", F.rank().over(Window.orderBy("value")))';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_WINDOW_001'), 'inline global window should be flagged');
+    });
+
+    test('no CODE_WINDOW_001 when partitionBy is present on the same line', () => {
+        const code = 'w = Window.partitionBy("user_id").orderBy("timestamp")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_WINDOW_001'), 'window with partitionBy should not be flagged');
+    });
+
+    test('no CODE_WINDOW_001 when partitionBy is on the preceding line (multi-line chain)', () => {
+        const code = [
+            'w = Window \\',
+            '    .partitionBy("user_id") \\',
+            '    .orderBy("timestamp")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_WINDOW_001'), 'multi-line window with partitionBy should not be flagged');
+    });
+
+    // ── Dynamic partition overwrite ───────────────────────────────────────────
+
+    test('CODE_DYN_PART_001: flags overwrite + partitionBy without dynamic overwrite config', () => {
+        const code = 'df.write.mode("overwrite").partitionBy("date").parquet("path")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_DYN_PART_001'), 'static partition overwrite should be flagged');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_DYN_PART_001')!.severity, 'info');
+    });
+
+    test('no CODE_DYN_PART_001 when dynamic overwrite is configured', () => {
+        const code = [
+            'spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")',
+            'df.write.mode("overwrite").partitionBy("date").parquet("path")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_DYN_PART_001'), 'dynamic overwrite configured — should not be flagged');
+    });
+
+    test('no CODE_DYN_PART_001 when overwrite has no partitionBy', () => {
+        const code = 'df.write.mode("overwrite").parquet("path")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_DYN_PART_001'), 'overwrite without partitionBy needs no dynamic config');
+    });
+
+    // ── Repeated source scan ───────────────────────────────────────────────────
+
+    test('CODE_REPRO_001: flags DataFrame used 2× without caching', () => {
+        const code = [
+            'big_df = spark.read.parquet("s3://bucket/data")',
+            'count = big_df.count()',
+            'result = big_df.filter(col("x") > 1)',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_REPRO_001'), 'should flag repeated source scan');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_REPRO_001')!.severity, 'warning');
+    });
+
+    test('CODE_REPRO_001: does not flag when cached before second use', () => {
+        const code = [
+            'big_df = spark.read.parquet("s3://bucket/data")',
+            'big_df.cache()',
+            'count = big_df.count()',
+            'result = big_df.filter(col("x") > 1)',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_REPRO_001'), 'cached before second use — should not flag');
+    });
+
+    test('CODE_REPRO_001: does not flag single-use DataFrame', () => {
+        const code = [
+            'df = spark.read.parquet("path")',
+            'result = df.filter(col("x") > 1)',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_REPRO_001'), 'single use — no repeated scan');
+    });
+
+    test('CODE_REPRO_001: does not flag lazy transformation chains (same var reassignment)', () => {
+        const code = [
+            'df = spark.read.parquet("path")',
+            'df = df.filter(col("x") > 0)',
+            'df = df.select("x", "y")',
+            'df.write.parquet("out")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_REPRO_001'), 'lazy transformation chain — should not flag');
+    });
+
+    test('CODE_REPRO_001: flags spark.table() used multiple times', () => {
+        const code = [
+            'orders = spark.table("catalog.orders")',
+            'count = orders.count()',
+            'top = orders.limit(10)',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_REPRO_001'), 'spark.table used twice — should flag');
+    });
+
+    test('CODE_REPRO_001: does not flag when persist() is used instead of cache()', () => {
+        const code = [
+            'df = spark.read.csv("data.csv")',
+            'df.persist()',
+            'c1 = df.count()',
+            'c2 = df.filter(col("x") > 0).count()',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_REPRO_001'), 'persist() before second use — should not flag');
     });
 });
