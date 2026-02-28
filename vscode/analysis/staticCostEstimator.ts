@@ -12,6 +12,8 @@ export interface ComputeSpec {
     cores: number;
     memoryGB: number;
     ratePerHour: number;
+    /** Multiplier applied to raw scan time to model full-notebook cost (default 2.0). */
+    overheadFactor: number;
     annotationLine: number;   // 0-based line index, for CodeLens placement
 }
 
@@ -47,15 +49,17 @@ export function parseComputeSpec(code: string): ComputeSpec | null {
         pairs[key] = val;
     }
 
-    const { nodes, cores, memory, rate } = pairs;
+    const { nodes, cores, memory, rate, overhead } = pairs;
     if (!nodes || !cores || !memory || !rate) { return null; }
 
     const nodesNum = parseInt(nodes, 10);
     const coresNum = parseInt(cores, 10);
     const memoryGB = parseMemoryGB(memory);
     const rateNum = parseFloat(rate);
+    // overhead= is optional; default 2.0 accounts for transforms/shuffles/writes on top of scans
+    const overheadFactor = overhead ? parseFloat(overhead) : 2.0;
 
-    if (isNaN(nodesNum) || isNaN(coresNum) || memoryGB === null || isNaN(rateNum)) { return null; }
+    if (isNaN(nodesNum) || isNaN(coresNum) || memoryGB === null || isNaN(rateNum) || isNaN(overheadFactor)) { return null; }
 
     // Find the 0-based line index of the @compute annotation
     const annotationLine = code.slice(0, match.index).split('\n').length - 1;
@@ -65,6 +69,7 @@ export function parseComputeSpec(code: string): ComputeSpec | null {
         cores: coresNum,
         memoryGB,
         ratePerHour: rateNum,
+        overheadFactor,
         annotationLine,
     };
 }
@@ -154,14 +159,22 @@ export function estimateStaticCost(code: string): StaticCostEstimate | null {
     const totalBytes = annotations.reduce((sum, a) => sum + a.sizeBytes, 0);
     const totalDataGB = totalBytes / (1024 * 1024 * 1024);
 
-    const estimate = estimateDollarCostFromTableStats(totalBytes, computeSpec.ratePerHour);
-    const dollars = estimate.dollars ?? 0;
+    // estimateDollarCostFromTableStats gives the scan-only cost.
+    // Multiply by overheadFactor to model full-notebook cost (transforms, shuffles, writes).
+    const scanEstimate = estimateDollarCostFromTableStats(totalBytes, computeSpec.ratePerHour);
+    const dollars = (scanEstimate.dollars ?? 0) * computeSpec.overheadFactor;
+    // No annotations → no data to estimate from; fall back to 'unknown'
+    const formattedCost = totalBytes === 0
+        ? 'unknown'
+        : dollars < 0.0001
+            ? '<$0.0001'
+            : `~$${dollars.toFixed(4)}`;
 
     return {
         computeSpec,
         annotations,
         totalDataGB,
-        formattedCost: estimate.formatted,
+        formattedCost,
         dollars,
     };
 }

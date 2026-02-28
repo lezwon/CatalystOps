@@ -883,3 +883,510 @@ df2.select(col("a1"))
             'paren inside string should not affect depth tracking');
     });
 });
+
+// ── Union Column-Order Checks ──────────────────────────────────────────────────
+
+suite('Union checks', () => {
+    const SCHEMA_HEADER = `from pyspark.sql.types import StructType, StructField, StringType, IntegerType, LongType\n`;
+
+    test('CODE_UNION_002: column order mismatch → CRITICAL', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("name", StringType()), StructField("id", IntegerType())])
+df1 = spark.createDataFrame(data1, schema=schema1)
+df2 = spark.createDataFrame(data2, schema=schema2)
+result = df1.union(df2)
+`.trim();
+        const issues = validateSchema(code);
+        const u = issues.find(i => i.id === 'CODE_UNION_002');
+        assert.ok(u, 'should flag column order mismatch');
+        assert.strictEqual(u!.severity, 'critical');
+        assert.ok(u!.title.includes('column order mismatch'), `unexpected title: ${u!.title}`);
+    });
+
+    test('CODE_UNION_002: different column sets → CRITICAL', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("id", IntegerType()), StructField("email", StringType())])
+df1 = spark.createDataFrame(data1, schema=schema1)
+df2 = spark.createDataFrame(data2, schema=schema2)
+result = df1.union(df2)
+`.trim();
+        const issues = validateSchema(code);
+        const u = issues.find(i => i.id === 'CODE_UNION_002');
+        assert.ok(u, 'should flag different column sets');
+        assert.ok(u!.description.includes('allowMissingColumns'), 'fix should mention allowMissingColumns');
+    });
+
+    test('no CODE_UNION_002 when column order matches', () => {
+        const code = SCHEMA_HEADER + `
+schema = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+df1 = spark.createDataFrame(data1, schema=schema)
+df2 = spark.createDataFrame(data2, schema=schema)
+result = df1.union(df2)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_UNION_002'), 'same schema order should not raise CODE_UNION_002');
+    });
+
+    test('no CODE_UNION_002 for unionByName regardless of order', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("name", StringType()), StructField("id", IntegerType())])
+df1 = spark.createDataFrame(data1, schema=schema1)
+df2 = spark.createDataFrame(data2, schema=schema2)
+result = df1.unionByName(df2)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_UNION_002'), 'unionByName should never raise CODE_UNION_002');
+    });
+
+    test('CODE_UNION_002 is suppressed by noqa', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("name", StringType()), StructField("id", IntegerType())])
+df1 = spark.createDataFrame(data1, schema=schema1)
+df2 = spark.createDataFrame(data2, schema=schema2)
+result = df1.union(df2)  # noqa: catalystops
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_UNION_002'), 'noqa should suppress CODE_UNION_002');
+    });
+
+    test('CODE_UNION_002 is on the correct line', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("name", StringType()), StructField("id", IntegerType())])
+df1 = spark.createDataFrame(data1, schema=schema1)
+df2 = spark.createDataFrame(data2, schema=schema2)
+result = df1.union(df2)
+`.trim();
+        const rawLines = code.split('\n');
+        const issues = validateSchema(code);
+        const u = issues.find(i => i.id === 'CODE_UNION_002');
+        assert.ok(u, 'issue should exist');
+        assert.strictEqual(rawLines[u!.line], 'result = df1.union(df2)');
+    });
+
+    test('CODE_UNION_002_MATCH: matching schemas emit SUGGESTION to prefer unionByName', () => {
+        const code = SCHEMA_HEADER + `
+schema = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+df1 = spark.createDataFrame(data1, schema=schema)
+df2 = spark.createDataFrame(data2, schema=schema)
+result = df1.union(df2)
+`.trim();
+        const issues = validateSchema(code);
+        const u = issues.find(i => i.id === 'CODE_UNION_002_MATCH');
+        assert.ok(u, 'should emit CODE_UNION_002_MATCH when schemas match');
+        assert.strictEqual(u!.severity, 'suggestion', 'should be SUGGESTION severity');
+    });
+
+    test('CODE_UNION_002_MATCH: fix suggests unionByName', () => {
+        const code = SCHEMA_HEADER + `
+schema = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+df1 = spark.createDataFrame(data1, schema=schema)
+df2 = spark.createDataFrame(data2, schema=schema)
+result = df1.union(df2)
+`.trim();
+        const issues = validateSchema(code);
+        const u = issues.find(i => i.id === 'CODE_UNION_002_MATCH');
+        assert.ok(u?.fix?.code?.includes('unionByName'), 'fix should reference unionByName');
+    });
+
+    test('no CODE_UNION_002_MATCH when schemas mismatch (CRITICAL emitted instead)', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("name", StringType()), StructField("id", IntegerType())])
+df1 = spark.createDataFrame(data1, schema=schema1)
+df2 = spark.createDataFrame(data2, schema=schema2)
+result = df1.union(df2)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_UNION_002_MATCH'), 'mismatch should not emit _MATCH');
+        assert.ok(issues.some(i => i.id === 'CODE_UNION_002'), 'mismatch should emit CODE_UNION_002 CRITICAL');
+    });
+
+    test('CODE_UNION_002_MATCH is suppressed by noqa', () => {
+        const code = SCHEMA_HEADER + `
+schema = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+df1 = spark.createDataFrame(data1, schema=schema)
+df2 = spark.createDataFrame(data2, schema=schema)
+result = df1.union(df2)  # noqa: catalystops
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_UNION_002_MATCH'), 'noqa should suppress _MATCH suggestion');
+    });
+});
+
+// ── Intersect / Except / Subtract checks ─────────────────────────────────────
+
+suite('Intersect / Except / Subtract checks', () => {
+    const SCHEMA_HEADER = `from pyspark.sql.types import StructType, StructField, StringType, IntegerType\n`;
+
+    test('CODE_INTERSECT_002: column order mismatch → CRITICAL', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("name", StringType()), StructField("id", IntegerType())])
+df1 = spark.createDataFrame(data1, schema=schema1)
+df2 = spark.createDataFrame(data2, schema=schema2)
+result = df1.intersect(df2)
+`.trim();
+        const issues = validateSchema(code);
+        const i = issues.find(x => x.id === 'CODE_INTERSECT_002');
+        assert.ok(i, 'should flag column order mismatch for intersect()');
+        assert.strictEqual(i!.severity, 'critical');
+    });
+
+    test('CODE_INTERSECT_002: intersectAll column order mismatch', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("a", IntegerType()), StructField("b", StringType())])
+schema2 = StructType([StructField("b", StringType()), StructField("a", IntegerType())])
+df1 = spark.createDataFrame([], schema=schema1)
+df2 = spark.createDataFrame([], schema=schema2)
+result = df1.intersectAll(df2)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(issues.some(x => x.id === 'CODE_INTERSECT_002'), 'should flag intersectAll() too');
+    });
+
+    test('no CODE_INTERSECT_002 when column order matches', () => {
+        const code = SCHEMA_HEADER + `
+schema = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+df1 = spark.createDataFrame(data1, schema=schema)
+df2 = spark.createDataFrame(data2, schema=schema)
+result = df1.intersect(df2)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(x => x.id === 'CODE_INTERSECT_002'), 'same order should not flag');
+    });
+
+    test('CODE_EXCEPT_002: except() column order mismatch → CRITICAL', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("name", StringType()), StructField("id", IntegerType())])
+df1 = spark.createDataFrame(data1, schema=schema1)
+df2 = spark.createDataFrame(data2, schema=schema2)
+result = df1.except(df2)
+`.trim();
+        const issues = validateSchema(code);
+        const e = issues.find(x => x.id === 'CODE_EXCEPT_002');
+        assert.ok(e, 'should flag column order mismatch for except()');
+        assert.strictEqual(e!.severity, 'critical');
+    });
+
+    test('CODE_EXCEPT_002: subtract() column order mismatch → CRITICAL', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("name", StringType()), StructField("id", IntegerType())])
+df1 = spark.createDataFrame(data1, schema=schema1)
+df2 = spark.createDataFrame(data2, schema=schema2)
+result = df1.subtract(df2)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(issues.some(x => x.id === 'CODE_EXCEPT_002'), 'should flag subtract() column mismatch');
+    });
+
+    test('CODE_EXCEPT_002: exceptAll() column order mismatch', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("name", StringType()), StructField("id", IntegerType())])
+df1 = spark.createDataFrame(data1, schema=schema1)
+df2 = spark.createDataFrame(data2, schema=schema2)
+result = df1.exceptAll(df2)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(issues.some(x => x.id === 'CODE_EXCEPT_002'), 'should flag exceptAll() too');
+    });
+
+    test('no CODE_INTERSECT_002 when intersect arg is an expression (user handled alignment)', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("name", StringType()), StructField("id", IntegerType())])
+df_l = spark.createDataFrame([], schema=schema1)
+df_r = spark.createDataFrame([], schema=schema2)
+hits_ok = df_l.intersect(df_r.select(df_l.columns))
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(x => x.id === 'CODE_INTERSECT_002'), 'expression arg means user handled alignment — should not flag');
+    });
+
+    test('no CODE_INTERSECT_002 for intersect inside a comment', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("name", StringType()), StructField("id", IntegerType())])
+df_l = spark.createDataFrame([], schema=schema1)
+df_r = spark.createDataFrame([], schema=schema2)
+# result = df_l.intersect(df_r)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(x => x.id === 'CODE_INTERSECT_002'), 'commented-out intersect should not be flagged');
+    });
+
+    test('no CODE_UNION_002 for union inside a comment', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("name", StringType()), StructField("id", IntegerType())])
+df1 = spark.createDataFrame([], schema=schema1)
+df2 = spark.createDataFrame([], schema=schema2)
+# result = df1.union(df2)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(x => x.id === 'CODE_UNION_002'), 'commented-out union should not be flagged');
+    });
+
+    test('no CODE_INTERSECT_002 when intersect has completely different column sets', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("id", IntegerType()), StructField("email", StringType())])
+df1 = spark.createDataFrame([], schema=schema1)
+df2 = spark.createDataFrame([], schema=schema2)
+result = df1.intersect(df2)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(x => x.id === 'CODE_INTERSECT_002'), 'different column sets should not trigger CODE_INTERSECT_002');
+    });
+
+    test('no CODE_EXCEPT_002 when except has completely different column sets', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("id", IntegerType()), StructField("email", StringType())])
+df1 = spark.createDataFrame([], schema=schema1)
+df2 = spark.createDataFrame([], schema=schema2)
+result = df1.except(df2)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(x => x.id === 'CODE_EXCEPT_002'), 'different column sets should not trigger CODE_EXCEPT_002');
+    });
+
+    test('no CODE_EXCEPT_002 when subtract has completely different column sets', () => {
+        const code = SCHEMA_HEADER + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("id", IntegerType()), StructField("email", StringType())])
+df1 = spark.createDataFrame([], schema=schema1)
+df2 = spark.createDataFrame([], schema=schema2)
+result = df1.subtract(df2)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(x => x.id === 'CODE_EXCEPT_002'), 'different column sets should not trigger CODE_EXCEPT_002 for subtract');
+    });
+});
+
+// ── UDF Return-Type Inference ─────────────────────────────────────────────────
+
+import { extractUdfReturnTypes, analyzeWriteOps } from '../../vscode/analysis/schemaTracker';
+
+suite('UDF return-type inference', () => {
+    test('extracts return type from positional udf() arg', () => {
+        const code = 'my_udf = udf(lambda x: x, IntegerType())';
+        const types = extractUdfReturnTypes(code);
+        assert.strictEqual(types.get('my_udf'), 'integer');
+    });
+
+    test('extracts return type from returnType= keyword arg', () => {
+        const code = 'my_udf = udf(my_func, returnType=StringType())';
+        const types = extractUdfReturnTypes(code);
+        assert.strictEqual(types.get('my_udf'), 'string');
+    });
+
+    test('extracts return type from @udf(returnType=...) decorator', () => {
+        const code = '@udf(returnType=DoubleType())\ndef my_fn(x):\n    return x * 2';
+        const types = extractUdfReturnTypes(code);
+        assert.strictEqual(types.get('my_fn'), 'double');
+    });
+
+    test('extracts return type from @udf(SomeType()) positional decorator', () => {
+        const code = '@udf(LongType())\ndef compute(x):\n    return x';
+        const types = extractUdfReturnTypes(code);
+        assert.strictEqual(types.get('compute'), 'long');
+    });
+
+    test('returns empty map when no UDFs present', () => {
+        const code = 'df = spark.read.parquet("s3://bucket")';
+        const types = extractUdfReturnTypes(code);
+        assert.strictEqual(types.size, 0);
+    });
+
+    test('UDF column type is tracked in schema and type mismatch is flagged', () => {
+        const code = `from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+schema = StructType([StructField("value", StringType())])
+df = spark.createDataFrame(data, schema=schema)
+int_udf = udf(lambda x: len(x), IntegerType())
+df2 = df.withColumn("int_col", int_udf(F.col("value")))
+result = df2.select(F.upper("int_col"))
+`;
+        const issues = validateSchema(code);
+        // F.upper requires a string column, but int_col is integer (from UDF) — should flag
+        assert.ok(issues.some(i => i.id === 'SCHEMA_TYPE_001'), 'should flag type mismatch on UDF column');
+    });
+
+    test('UDF with correct return type does not produce false-positive', () => {
+        const code = `from pyspark.sql.types import StructType, StructField, StringType
+schema = StructType([StructField("value", StringType())])
+df = spark.createDataFrame(data, schema=schema)
+str_udf = udf(lambda x: x.upper(), StringType())
+df2 = df.withColumn("upper_col", str_udf(F.col("value")))
+result = df2.select(F.upper("upper_col"))
+`;
+        const issues = validateSchema(code);
+        // F.upper requires string, upper_col is string (from UDF) — should NOT flag
+        assert.ok(!issues.some(i => i.id === 'SCHEMA_TYPE_001'), 'should not flag when UDF return type matches');
+    });
+});
+
+// ── Write Operation Analysis ───────────────────────────────────────────────────
+
+suite('analyzeWriteOps', () => {
+    test('detects a simple batch write', () => {
+        const code = `from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+schema = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+df = spark.createDataFrame(data, schema=schema)
+df.write.mode("overwrite").parquet("output/")
+`;
+        const ops = analyzeWriteOps(code);
+        assert.ok(ops.length > 0, 'should find at least one write operation');
+        const op = ops[0];
+        assert.strictEqual(op.varName, 'df');
+        assert.strictEqual(op.isStreaming, false);
+        assert.ok(op.columns.some(c => c.name === 'id'), 'should include id column');
+        assert.ok(op.columns.some(c => c.name === 'name'), 'should include name column');
+    });
+
+    test('detects a streaming write', () => {
+        const code = `from pyspark.sql.types import StructType, StructField, StringType
+schema = StructType([StructField("msg", StringType())])
+df = spark.readStream.schema(schema).json("s3://input/")
+df.writeStream.format("delta").start()
+`;
+        const ops = analyzeWriteOps(code);
+        const streamOp = ops.find(o => o.isStreaming);
+        assert.ok(streamOp, 'should detect streaming write');
+        assert.strictEqual(streamOp!.varName, 'df');
+    });
+
+    test('captures destination from .parquet(path)', () => {
+        const code = `from pyspark.sql.types import StructType, StructField, StringType
+schema = StructType([StructField("x", StringType())])
+df = spark.createDataFrame(data, schema=schema)
+df.write.parquet("s3://bucket/output")
+`;
+        const ops = analyzeWriteOps(code);
+        assert.ok(ops.length > 0);
+        assert.strictEqual(ops[0].destination, 's3://bucket/output');
+    });
+
+    test('returns empty columns when schema is unknown', () => {
+        const code = 'df = spark.read.parquet("s3://bucket")\ndf.write.mode("overwrite").parquet("out/")';
+        const ops = analyzeWriteOps(code);
+        assert.ok(ops.length > 0, 'should still detect the write');
+        assert.strictEqual(ops[0].columns.length, 0, 'columns should be empty when schema unknown');
+    });
+
+    test('does not detect Python file.write() as a Spark write', () => {
+        const code = 'with open("out.txt", "w") as f:\n    f.write("hello")';
+        const ops = analyzeWriteOps(code);
+        assert.strictEqual(ops.length, 0, 'should not treat file.write() as Spark write');
+    });
+});
+
+// ── Proactive schema-alignment check (SCHEMA_ALIGN_001) ───────────────────────
+
+suite('Schema column alignment (SCHEMA_ALIGN_001)', () => {
+    const HDR = `from pyspark.sql.types import StructType, StructField, StringType, IntegerType\n`;
+
+    test('emits SCHEMA_ALIGN_001 when two DataFrames share the same columns in different order', () => {
+        const code = HDR + `
+schema1 = StructType([StructField("col1", StringType()), StructField("col2", IntegerType()), StructField("col3", StringType())])
+schema2 = StructType([StructField("col1", StringType()), StructField("col3", StringType()), StructField("col2", IntegerType())])
+df1 = spark.createDataFrame([], schema=schema1)
+df2 = spark.createDataFrame([], schema=schema2)
+`.trim();
+        const issues = validateSchema(code);
+        const a = issues.find(i => i.id === 'SCHEMA_ALIGN_001');
+        assert.ok(a, 'should emit SCHEMA_ALIGN_001');
+        assert.strictEqual(a!.severity, 'warning', 'should be WARNING severity');
+    });
+
+    test('SCHEMA_ALIGN_001 is reported on the later DataFrame line', () => {
+        const code = HDR + `
+schema1 = StructType([StructField("col1", StringType()), StructField("col2", IntegerType()), StructField("col3", StringType())])
+schema2 = StructType([StructField("col1", StringType()), StructField("col3", StringType()), StructField("col2", IntegerType())])
+df1 = spark.createDataFrame([], schema=schema1)
+df2 = spark.createDataFrame([], schema=schema2)
+`.trim();
+        const rawLines = code.split('\n');
+        const issues = validateSchema(code);
+        const a = issues.find(i => i.id === 'SCHEMA_ALIGN_001');
+        assert.ok(a, 'issue should exist');
+        assert.ok(rawLines[a!.line].includes('df2'), 'should be reported on the df2 line');
+    });
+
+    test('fix suggests reordering to match the first DataFrame', () => {
+        const code = HDR + `
+schema1 = StructType([StructField("col1", StringType()), StructField("col2", IntegerType()), StructField("col3", StringType())])
+schema2 = StructType([StructField("col1", StringType()), StructField("col3", StringType()), StructField("col2", IntegerType())])
+df1 = spark.createDataFrame([], schema=schema1)
+df2 = spark.createDataFrame([], schema=schema2)
+`.trim();
+        const issues = validateSchema(code);
+        const a = issues.find(i => i.id === 'SCHEMA_ALIGN_001');
+        assert.ok(a?.fix?.code?.includes('"col1", "col2", "col3"'), 'fix should reorder to match df1');
+    });
+
+    test('no SCHEMA_ALIGN_001 when column orders are the same', () => {
+        const code = HDR + `
+schema = StructType([StructField("col1", StringType()), StructField("col2", IntegerType())])
+df1 = spark.createDataFrame([], schema=schema)
+df2 = spark.createDataFrame([], schema=schema)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(i => i.id === 'SCHEMA_ALIGN_001'), 'same order should not trigger SCHEMA_ALIGN_001');
+    });
+
+    test('no SCHEMA_ALIGN_001 when column sets differ (different columns, not just reordered)', () => {
+        const code = HDR + `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("id", IntegerType()), StructField("email", StringType())])
+df1 = spark.createDataFrame([], schema=schema1)
+df2 = spark.createDataFrame([], schema=schema2)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(i => i.id === 'SCHEMA_ALIGN_001'), 'different column sets should not trigger SCHEMA_ALIGN_001');
+    });
+
+    test('SCHEMA_ALIGN_001 is suppressed by noqa on the later DataFrame line', () => {
+        const code = HDR + `
+schema1 = StructType([StructField("col1", StringType()), StructField("col2", IntegerType())])
+schema2 = StructType([StructField("col2", IntegerType()), StructField("col1", StringType())])
+df1 = spark.createDataFrame([], schema=schema1)
+df2 = spark.createDataFrame([], schema=schema2)  # noqa: catalystops
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(!issues.some(i => i.id === 'SCHEMA_ALIGN_001'), 'noqa should suppress SCHEMA_ALIGN_001');
+    });
+
+    test('works with multi-line StructType and createDataFrame (user scenario)', () => {
+        const code = HDR + `
+schema1 = StructType([
+    StructField("col1", StringType()),
+    StructField("col2", IntegerType()),
+    StructField("col3", StringType()),
+])
+schema2 = StructType([
+    StructField("col1", StringType()),
+    StructField("col3", StringType()),
+    StructField("col2", IntegerType()),
+])
+df1 = spark.createDataFrame(
+    [("A", 10, "x"), ("B", 20, "y")],
+    schema=schema1
+)
+df2 = spark.createDataFrame(
+    [("A", 10, "x"), ("C", 30, "z")],
+    schema=schema2
+)
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(issues.some(i => i.id === 'SCHEMA_ALIGN_001'), 'should detect column order mismatch in multi-line code');
+    });
+});
+

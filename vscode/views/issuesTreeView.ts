@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import { CodeIssue, Severity, AnalysisResult, Issue } from '../models/types';
 import { SEVERITY_PRIORITY } from '../models/types';
 import { StaticCostEstimate } from '../analysis/staticCostEstimator';
+import { WriteOperation } from '../analysis/schemaTracker';
 
 export type ProgressStepStatus = 'pending' | 'running' | 'done' | 'error';
 
@@ -15,7 +16,7 @@ export interface ProgressStep {
     detail?: string;
 }
 
-type TreeItem = ProgressGroupItem | ProgressStepItem | SeverityGroupItem | IssueItem | CostEstimateGroupItem | CostEstimateItem;
+type TreeItem = ProgressGroupItem | ProgressStepItem | SeverityGroupItem | IssueItem | CostEstimateGroupItem | CostEstimateItem | OutputGroupItem | WriteOperationItem | WriteColumnItem;
 
 export class IssuesTreeDataProvider implements vscode.TreeDataProvider<TreeItem> {
     private _onDidChangeTreeData = new vscode.EventEmitter<TreeItem | undefined>();
@@ -25,6 +26,7 @@ export class IssuesTreeDataProvider implements vscode.TreeDataProvider<TreeItem>
     private clusterIssues: Issue[] = [];
     private progressSteps: ProgressStep[] = [];
     private costEstimate: StaticCostEstimate | null = null;
+    private writeOps: WriteOperation[] = [];
 
     setProgress(steps: ProgressStep[]): void {
         this.progressSteps = [...steps];
@@ -38,6 +40,11 @@ export class IssuesTreeDataProvider implements vscode.TreeDataProvider<TreeItem>
 
     updateCostEstimate(estimate: StaticCostEstimate | null): void {
         this.costEstimate = estimate;
+        this._onDidChangeTreeData.fire(undefined);
+    }
+
+    updateWriteOperations(ops: WriteOperation[]): void {
+        this.writeOps = ops;
         this._onDidChangeTreeData.fire(undefined);
     }
 
@@ -62,6 +69,9 @@ export class IssuesTreeDataProvider implements vscode.TreeDataProvider<TreeItem>
             if (this.costEstimate !== null) {
                 items.push(new CostEstimateGroupItem(this.costEstimate));
             }
+            if (this.writeOps.length > 0) {
+                items.push(new OutputGroupItem(this.writeOps));
+            }
             if (this.progressSteps.length > 0) {
                 items.push(new ProgressGroupItem(this.progressSteps));
             }
@@ -70,6 +80,14 @@ export class IssuesTreeDataProvider implements vscode.TreeDataProvider<TreeItem>
         }
 
         if (element instanceof CostEstimateGroupItem) {
+            return element.children;
+        }
+
+        if (element instanceof OutputGroupItem) {
+            return element.children;
+        }
+
+        if (element instanceof WriteOperationItem) {
             return element.children;
         }
 
@@ -164,6 +182,47 @@ class IssueItem extends vscode.TreeItem {
                 arguments: [{ lineNumber: issue.line, at: 'center' }],
             };
         }
+    }
+}
+
+class OutputGroupItem extends vscode.TreeItem {
+    children: WriteOperationItem[];
+
+    constructor(ops: WriteOperation[]) {
+        super('Outputs', vscode.TreeItemCollapsibleState.Collapsed);
+        this.iconPath = new vscode.ThemeIcon('database');
+        this.children = ops.map(op => new WriteOperationItem(op));
+    }
+}
+
+class WriteOperationItem extends vscode.TreeItem {
+    children: WriteColumnItem[];
+
+    constructor(op: WriteOperation) {
+        const writeLabel = op.isStreaming ? 'writeStream' : 'write';
+        const destSuffix = op.destination ? ` → "${op.destination}"` : '';
+        const label = `${op.varName}.${writeLabel}${destSuffix}`;
+        const colCount = op.columns.length;
+        const state = colCount > 0
+            ? vscode.TreeItemCollapsibleState.Collapsed
+            : vscode.TreeItemCollapsibleState.None;
+        super(label, state);
+        this.description = colCount > 0 ? `${colCount} column${colCount !== 1 ? 's' : ''}` : 'schema unknown';
+        this.iconPath = new vscode.ThemeIcon(op.isStreaming ? 'broadcast' : 'arrow-right');
+        this.command = {
+            command: 'revealLine',
+            title: 'Go to write statement',
+            arguments: [{ lineNumber: op.writeLine, at: 'center' }],
+        };
+        this.children = op.columns.map(c => new WriteColumnItem(c.name, c.type));
+    }
+}
+
+class WriteColumnItem extends vscode.TreeItem {
+    constructor(colName: string, colType: string) {
+        super(colName, vscode.TreeItemCollapsibleState.None);
+        this.description = colType;
+        this.iconPath = new vscode.ThemeIcon('symbol-field');
     }
 }
 

@@ -4,12 +4,25 @@
 
 import * as vscode from 'vscode';
 import { DIAGNOSTIC_SOURCE } from '../models/constants';
+import { extractStructTypeSchemas, extractDdlSchemas } from '../analysis/schemaExtractor';
+import { buildDfSchemaMap, schemaAtLine } from '../analysis/schemaTracker';
 
 interface FixEntry {
     detail: string;
     fix?: string;
     config?: Record<string, string>;
 }
+
+// Keyed by issue ID — used as fallback when the title is dynamic (contains variable names).
+const ISSUE_INFO_BY_ID: Record<string, FixEntry> = {
+    'SCHEMA_ALIGN_001': {
+        detail: 'These DataFrames have the same column names but in a different order. ' +
+            'Positional operations — `union()`, `intersect()`, `except()`, `subtract()` — match ' +
+            'rows by column **position**, not name. Mismatched ordering silently puts values in ' +
+            'the wrong columns.',
+        fix: '# Reorder the later DataFrame to match the first:\ndf2 = df2.select("col1", "col2", "col3")\n\n# Or use unionByName() which ignores column order:\nresult = df1.unionByName(df2)',
+    },
+};
 
 // Keyed by the exact issue title (= diagnostic.message after the message-shortening fix)
 const ISSUE_INFO: Record<string, FixEntry> = {
@@ -186,6 +199,18 @@ streaming_df.withWatermark("event_time", "1 hour").dropDuplicates(["id", "event_
         detail: 'checkpoint() writes the full DataFrame to HDFS/S3 and truncates the lineage graph. This incurs I/O cost every time it runs.',
         fix: '# In-memory persistence (fastest reads):\ndf.cache()\n\n# Local checkpoint (no HDFS write, truncates lineage):\ndf.localCheckpoint()',
     },
+    'union() Matches by Column Position, Not Name': {
+        detail: 'union() combines DataFrames by column position. If schemas have a different column order, values land in the wrong columns silently. Use unionByName() to merge by name.',
+        fix: '# Safe name-based union:\nresult = df1.unionByName(df2)\n\n# If column sets may differ:\nresult = df1.unionByName(df2, allowMissingColumns=True)',
+    },
+    'intersect() / intersectAll() Match by Column Position': {
+        detail: 'intersect() compares rows by column position. A different column order between the DataFrames will silently compare wrong pairs of columns.',
+        fix: '# Align column order before intersecting:\ncols = df1.columns\nresult = df1.intersect(df2.select(cols))',
+    },
+    'except() / exceptAll() / subtract() Match by Column Position': {
+        detail: 'except(), exceptAll(), and subtract() compare rows by column position. A column order difference silently produces wrong results.',
+        fix: '# Align column order before subtracting:\ncols = df1.columns\nresult = df1.subtract(df2.select(cols))',
+    },
     'Same Source Scanned Multiple Times': {
         detail: 'The physical/logical plan shows this table or file is scanned more than once. Each scan triggers separate I/O and compute. Cache after the first read and reuse the result.',
         fix: 'df = spark.table("my_table").cache()\n# or:\ndf = spark.read.parquet("path/").cache()\n\n# Reuse df everywhere instead of reading again',
@@ -232,7 +257,8 @@ export function createHoverProvider(): vscode.HoverProvider {
                 const icon = getSeverityIcon(diag.severity);
                 md.appendMarkdown(`### ${icon} ${diag.message}\n\n`);
 
-                const info = ISSUE_INFO[diag.message];
+                const info = ISSUE_INFO[diag.message]
+                    ?? (typeof diag.code === 'string' ? ISSUE_INFO_BY_ID[diag.code] : undefined);
                 if (info) {
                     md.appendMarkdown(`${info.detail}\n\n`);
                     if (info.fix) {
@@ -262,4 +288,55 @@ function getSeverityIcon(severity: vscode.DiagnosticSeverity): string {
         case vscode.DiagnosticSeverity.Information: return '$(info)';
         default: return '$(lightbulb)';
     }
+}
+
+const NON_DF_NAMES = new Set(['F', 'functions', 'spark', 'sc', 'sqlContext', 'col', 'lit']);
+
+/**
+ * Hover provider that shows the output column schema when hovering over
+ * a DataFrame .write or .writeStream call.
+ */
+export function createWriteSchemaHoverProvider(): vscode.HoverProvider {
+    return {
+        provideHover(
+            document: vscode.TextDocument,
+            position: vscode.Position,
+        ): vscode.Hover | undefined {
+            const lineText = document.lineAt(position).text;
+
+            // Detect a .write or .writeStream call on this line
+            const writeMatch = /\b([A-Za-z_]\w*)\.(writeStream|write)\b/.exec(lineText);
+            if (!writeMatch) { return undefined; }
+
+            const varName = writeMatch[1];
+            const isStreaming = writeMatch[2] === 'writeStream';
+            if (NON_DF_NAMES.has(varName)) { return undefined; }
+
+            // Skip if followed by '(' — that would be file.write(data)
+            const afterWrite = lineText.substring(writeMatch.index + writeMatch[0].length).trimStart();
+            if (afterWrite.startsWith('(')) { return undefined; }
+
+            const code = document.getText();
+            const structSchemas = extractStructTypeSchemas(code);
+            const ddlSchemas    = extractDdlSchemas(code);
+            const history = buildDfSchemaMap(code, structSchemas, ddlSchemas);
+            const schema  = schemaAtLine(history, varName, position.line);
+
+            if (!schema || schema.length === 0) { return undefined; }
+
+            const md = new vscode.MarkdownString();
+            md.isTrusted = true;
+            md.supportThemeIcons = true;
+
+            const writeLabel = isStreaming ? 'Streaming Write' : 'Write';
+            md.appendMarkdown(`### $(database) ${writeLabel}: \`${varName}\`\n\n`);
+            md.appendMarkdown(`**Output columns (${schema.length}):**\n\n`);
+            md.appendMarkdown('| Column | Type |\n|--------|------|\n');
+            for (const field of schema) {
+                md.appendMarkdown(`| \`${field.name}\` | \`${field.type}\` |\n`);
+            }
+
+            return new vscode.Hover(md);
+        },
+    };
 }

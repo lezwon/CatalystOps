@@ -36,6 +36,7 @@ export function setCodeIssueDiagnostics(uri: vscode.Uri, issues: CodeIssue[]): v
         );
 
         diagnostic.source = DIAGNOSTIC_SOURCE;
+        diagnostic.code   = issue.id;
 
         return diagnostic;
     });

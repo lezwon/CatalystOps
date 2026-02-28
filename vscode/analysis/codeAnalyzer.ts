@@ -21,7 +21,7 @@ const antiPatterns: CodePattern[] = [
         id: 'CODE_UDF_001',
         name: 'UDF Usage Detected',
         pattern: /(?:@udf|udf\s*\(|\.udf\.|F\.udf)/gi,
-        severity: Severity.WARNING,
+        severity: Severity.INFO,
         category: IssueCategory.CODE,
         description: 'User Defined Functions (UDFs) prevent Spark from optimizing the query plan and cause serialization overhead',
         fix: {
@@ -435,6 +435,26 @@ df.cache()
 
 # Local checkpoint (no HDFS write, faster than checkpoint()):
 df.localCheckpoint()`,
+        },
+    },
+    {
+        id: 'CODE_UNION_001',
+        name: 'union() Matches by Column Position, Not Name',
+        // Match .union( but NOT .unionByName(
+        pattern: /\.union(?!ByName)\s*\(/g,
+        severity: Severity.WARNING,
+        category: IssueCategory.CODE,
+        description: 'union() combines DataFrames by column position. If the two schemas have a different column order, values will be silently placed in the wrong columns. Use unionByName() to match columns by name instead.',
+        fix: {
+            description: 'Replace .union() with .unionByName() for schema-safe merging',
+            code: `# Instead of:
+result = df1.union(df2)          # position-based — silent data corruption if order differs
+
+# Use:
+result = df1.unionByName(df2)    # name-based — safe regardless of column order
+
+# If DataFrames have different column sets, add allowMissingColumns:
+result = df1.unionByName(df2, allowMissingColumns=True)`,
         },
     },
 ];

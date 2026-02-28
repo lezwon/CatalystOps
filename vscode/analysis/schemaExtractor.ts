@@ -239,16 +239,40 @@ export function extractDdlSchemas(code: string): SchemaMap {
 // ── Line-continuation joining ─────────────────────────────────────────────────
 
 /**
- * Join Python backslash line-continuations into single logical lines.
+ * Count the net open-bracket depth of a single line of Python source,
+ * ignoring brackets inside string literals and after a '#' comment marker.
+ * Triple-quoted strings are not handled (rare in PySpark schema code).
+ */
+function netParenDepth(line: string): number {
+    let depth = 0;
+    let inStr: string | null = null;
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (inStr) {
+            if (ch === '\\') { i++; continue; }   // skip escaped char
+            if (ch === inStr) { inStr = null; }
+        } else if (ch === '#') {
+            break;                                  // rest is a comment
+        } else if (ch === '"' || ch === "'") {
+            inStr = ch;
+        } else if (ch === '(' || ch === '[' || ch === '{') {
+            depth++;
+        } else if (ch === ')' || ch === ']' || ch === '}') {
+            depth--;
+        }
+    }
+    return depth;
+}
+
+/**
+ * Join Python line-continuations into single logical lines.
+ * Handles both:
+ *   • explicit backslash continuations  (`df = df \\\n    .select(...)`)
+ *   • implicit paren/bracket continuations (`spark.createDataFrame(\n    [...],\n    schema=s\n)`)
  *
  * Returns:
  *   joinedLines – merged lines (may be shorter than the input array)
  *   lineMap     – maps each joined-line index → the original first-line index
- *
- * Example:
- *   ["df = df \\", ".withColumn(...) \\", ".withColumn(...)"]
- *   → joinedLines: ["df = df.withColumn(...).withColumn(...)"]
- *   → lineMap:     [0]
  */
 export function joinContinuationLines(lines: string[]): {
     joinedLines: string[];
@@ -260,10 +284,23 @@ export function joinContinuationLines(lines: string[]): {
     while (i < lines.length) {
         let joined = lines[i];
         const origIdx = i;
-        while (joined.trimEnd().endsWith('\\') && i + 1 < lines.length) {
+        // Track bracket depth INCREMENTALLY across individual original lines.
+        // Calling netParenDepth(joined) on the whole accumulated string is wrong:
+        // a line like `foo([  # inline comment` has depth 2, but after appending
+        // the next line the '#' makes netParenDepth treat the appended code as
+        // comment text, so brackets in subsequent lines are never seen.
+        let depth = netParenDepth(lines[i]);
+        while (i + 1 < lines.length) {
+            const trimmed = joined.trimEnd();
+            const isBackslash = trimmed.endsWith('\\');
+            if (!isBackslash && depth <= 0) { break; }
             i++;
-            // Remove trailing backslash + surrounding whitespace at the join point
-            joined = joined.trimEnd().slice(0, -1).trimEnd() + lines[i].trimStart();
+            if (isBackslash) {
+                joined = trimmed.slice(0, -1).trimEnd() + ' ' + lines[i].trimStart();
+            } else {
+                joined = joined + ' ' + lines[i].trimStart();
+            }
+            depth += netParenDepth(lines[i]);
         }
         joinedLines.push(joined);
         lineMap.push(origIdx);

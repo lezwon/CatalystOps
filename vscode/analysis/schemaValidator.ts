@@ -109,6 +109,12 @@ const CATEGORY_TYPE_LIST: Record<string, string> = {
     'date/timestamp': 'date or timestamp',
 };
 
+const CATEGORY_CAST_TYPE: Record<string, string> = {
+    numeric:          'LongType()',
+    string:           'StringType()',
+    'date/timestamp': 'TimestampType()',
+};
+
 function makeTypeIssue(
     colName: string,
     funcName: string,
@@ -118,13 +124,24 @@ function makeTypeIssue(
     column: number,
 ): CodeIssue {
     const expectedTypes = CATEGORY_TYPE_LIST[expectedCategory] ?? expectedCategory;
+    const castType = CATEGORY_CAST_TYPE[expectedCategory] ?? 'appropriate_type()';
     return {
         id: 'SCHEMA_TYPE_001',
         severity: Severity.WARNING,
         category: IssueCategory.CODE,
         title: `Type mismatch: "${funcName}" expects ${expectedCategory} but "${colName}" is ${actualType}`,
-        description: `Function "${funcName}" requires a ${expectedCategory} column (${expectedTypes}), but "${colName}" is of type ${actualType}.`,
-        fix: { description: `Cast "${colName}" to a compatible type (${expectedTypes}), or use an appropriate conversion function.` },
+        description: `Function "${funcName}" requires a ${expectedCategory} column (${expectedTypes}), but "${colName}" is of type ${actualType}. If this column is produced by a UDF, declare its return type explicitly and cast the output.`,
+        fix: {
+            description: `Cast "${colName}" to a compatible type, or cast a UDF's return value at the call site.`,
+            code: `# Option 1 — cast the column:
+df = df.withColumn("${colName}", F.col("${colName}").cast(${castType}))
+
+# Option 2 — cast inside withColumn if produced by a UDF:
+df = df.withColumn("${colName}", my_udf(F.col("input")).cast(${castType}))
+
+# Option 3 — declare the UDF return type to let Spark track it:
+my_udf = udf(my_func, returnType=${castType})`,
+        },
         line: lineIdx,
         column,
         endLine: lineIdx,
@@ -728,6 +745,274 @@ function columnsAddedBeforePos(line: string, beforeIdx: number): Set<string> {
     return added;
 }
 
+// ── Set-operation column-order checker ────────────────────────────────────────
+
+interface SetOpSpec {
+    /** Regex that matches the method call opening paren. */
+    pattern: RegExp;
+    /** Code ID to emit when the schemas differ. */
+    issueId: string;
+    /** Human-readable method name used in error messages. */
+    methodName: string;
+    /** Suggested fix when schemas can differ (null = same-order-only, no allowMissingColumns). */
+    missingColsFix: string | null;
+}
+
+/** Set operations that compare rows by column position, not name. */
+const POSITIONAL_SET_OPS: SetOpSpec[] = [
+    {
+        pattern: /\.union(?!ByName)\s*\(/g,
+        issueId: 'CODE_UNION_002',
+        methodName: 'union()',
+        missingColsFix: 'unionByName(allowMissingColumns=True)',
+    },
+    {
+        pattern: /\.intersect(?:All)?\s*\(/g,
+        issueId: 'CODE_INTERSECT_002',
+        methodName: 'intersect()',
+        missingColsFix: null,
+    },
+    {
+        pattern: /\.(?:except(?:All)?|subtract)\s*\(/g,
+        issueId: 'CODE_EXCEPT_002',
+        methodName: 'except() / subtract()',
+        missingColsFix: null,
+    },
+];
+
+/**
+ * Scan for positional set operations (.union, .intersect, .except, .subtract)
+ * where both DataFrames have known schemas, and flag schema mismatches as CRITICAL.
+ *
+ * - Same column set but different order → CRITICAL (silent wrong results)
+ * - Different column sets → CRITICAL (runtime error or wrong results)
+ *
+ * Falls back to the generic CODE_*_001 pattern in codeAnalyzer for cases
+ * where schemas are not statically known.
+ */
+/**
+ * Return true if `column` on `lineText` falls inside a Python comment.
+ * Handles '#' inside string literals (they are NOT comment markers).
+ */
+function isInComment(lineText: string, column: number): boolean {
+    let inStr: string | null = null;
+    for (let i = 0; i < column; i++) {
+        const ch = lineText[i];
+        if (inStr) {
+            if (ch === '\\') { i++; continue; }
+            if (ch === inStr) { inStr = null; }
+        } else if (ch === '"' || ch === "'") {
+            inStr = ch;
+        } else if (ch === '#') {
+            return true;
+        }
+    }
+    return false;
+}
+
+function checkAllPositionalSetOps(
+    code: string,
+    history: BindingHistory,
+    issues: CodeIssue[],
+): void {
+    const NON_DF = new Set(['F', 'functions', 'spark', 'sc', 'sqlContext', 'col', 'lit']);
+    const rawLines = code.split('\n');
+
+    for (const spec of POSITIONAL_SET_OPS) {
+        spec.pattern.lastIndex = 0;
+        let m: RegExpExecArray | null;
+
+        while ((m = spec.pattern.exec(code)) !== null) {
+            const openPos = m.index + m[0].length - 1;
+            const closePos = findMatchingParen(code, openPos);
+            if (closePos === -1) { continue; }
+
+            const reportLine = code.substring(0, m.index).split('\n').length - 1;
+            const lineStart = code.lastIndexOf('\n', m.index) + 1;
+            const col = m.index - lineStart;
+            const lineText = rawLines[reportLine] ?? '';
+
+            // Skip comment lines and noqa-suppressed lines
+            if (isInComment(lineText, col)) { continue; }
+            if (/# noqa: catalystops\b/i.test(lineText)) { continue; }
+
+            // Left DataFrame: identifier immediately before the method call
+            const before = code.substring(0, m.index).replace(/\.\s*alias\s*\(\s*["']\w+["']\s*\)\s*$/, '');
+            const leftDfM = /\b(\w+)\s*$/.exec(before);
+            if (!leftDfM || NON_DF.has(leftDfM[1])) { continue; }
+            const leftDfVar = leftDfM[1];
+            const leftSchema = schemaAtLine(history, leftDfVar, reportLine);
+            if (!leftSchema) { continue; }
+
+            // Right DataFrame: must be a bare variable name (not df_r.select(...) etc.)
+            // If the user is passing an expression, they are already handling schema alignment.
+            const argsText = code.substring(openPos + 1, closePos).trim();
+            const rightDfName = /^(\w+)\s*$/.exec(argsText)?.[1];
+            if (!rightDfName || NON_DF.has(rightDfName)) { continue; }
+            const rightSchema = schemaAtLine(history, rightDfName, reportLine);
+            if (!rightSchema) { continue; }
+
+            const leftCols  = leftSchema.map(f => f.name);
+            const rightCols = rightSchema.map(f => f.name);
+            const leftSet   = new Set(leftCols);
+            const rightSet  = new Set(rightCols);
+
+            const sameColumnSet =
+                leftCols.length === rightCols.length &&
+                leftCols.every(c => rightSet.has(c)) &&
+                rightCols.every(c => leftSet.has(c));
+
+            if (!sameColumnSet) {
+                // For intersect/except, column-set mismatches produce a runtime schema error
+                // that is obvious (Spark will raise). Only flag the subtle silent bug:
+                // same columns but in different order. Skip different-column-set cases.
+                if (!spec.missingColsFix) { continue; }
+
+                const leftOnly  = leftCols.filter(c => !rightSet.has(c));
+                const rightOnly = rightCols.filter(c => !leftSet.has(c));
+                const detail = [
+                    leftOnly.length  ? `"${leftDfVar}" has extra: [${leftOnly.join(', ')}]`  : '',
+                    rightOnly.length ? `"${rightDfName}" has extra: [${rightOnly.join(', ')}]` : '',
+                ].filter(Boolean).join('; ');
+
+                const fixCode = `result = ${leftDfVar}.${spec.missingColsFix.replace('(', `(${rightDfName}, `)}`;
+
+                issues.push({
+                    id: spec.issueId,
+                    severity: Severity.CRITICAL,
+                    category: IssueCategory.CODE,
+                    title: `${spec.methodName} schema mismatch: "${leftDfVar}" and "${rightDfName}" have different columns`,
+                    description: `${spec.methodName} requires identical schemas but the DataFrames have different column sets. ${detail}. Use ${spec.missingColsFix} to handle differing schemas.`,
+                    fix: { description: `Align schemas before using ${spec.methodName}.`, code: fixCode },
+                    line: reportLine,
+                    column: col,
+                    endLine: reportLine,
+                    endColumn: col + m[0].length,
+                    location: `Line ${reportLine + 1}`,
+                });
+                continue;
+            }
+
+            // Same column set — check whether the order differs
+            const sameOrder = leftCols.every((c, i) => c === rightCols[i]);
+            if (!sameOrder) {
+                const fixCode = spec.missingColsFix
+                    ? `result = ${leftDfVar}.unionByName(${rightDfName})`
+                    : `# Align column order:\ncols = ${leftDfVar}.columns\nresult = ${leftDfVar}.${m[0].trimStart().slice(1, -1)}(${rightDfName}.select(cols))`;
+
+                issues.push({
+                    id: spec.issueId,
+                    severity: Severity.CRITICAL,
+                    category: IssueCategory.CODE,
+                    title: `${spec.methodName} column order mismatch: "${leftDfVar}" vs "${rightDfName}"`,
+                    description: `${spec.methodName} matches rows by position, not name.\n` +
+                        `"${leftDfVar}": [${leftCols.join(', ')}]\n` +
+                        `"${rightDfName}": [${rightCols.join(', ')}]\n` +
+                        `Rows will be compared using the wrong columns silently.`,
+                    fix: { description: `Align column order before calling ${spec.methodName}.`, code: fixCode },
+                    line: reportLine,
+                    column: col,
+                    endLine: reportLine,
+                    endColumn: col + m[0].length,
+                    location: `Line ${reportLine + 1}`,
+                });
+            } else {
+                // Same column set AND same order — schemas are compatible.
+                // Emit a SUGGESTION to still prefer the name-based variant.
+                // (Only applies to set operations that have a name-based alternative.)
+                if (spec.missingColsFix) {
+                    issues.push({
+                        id: `${spec.issueId}_MATCH`,
+                        severity: Severity.SUGGESTION,
+                        category: IssueCategory.CODE,
+                        title: `${spec.methodName} schemas match on "${leftDfVar}" and "${rightDfName}" — prefer unionByName`,
+                        description: `Schemas are compatible (columns in the same order): [${leftCols.join(', ')}]. ` +
+                            `${spec.methodName} is safe here, but unionByName() is more robust — it will stay correct if column order ever changes.`,
+                        fix: {
+                            description: `Replace .union(${rightDfName}) with .unionByName(${rightDfName})`,
+                            code: `result = ${leftDfVar}.unionByName(${rightDfName})`,
+                        },
+                        line: reportLine,
+                        column: col,
+                        endLine: reportLine,
+                        endColumn: col + m[0].length,
+                        location: `Line ${reportLine + 1}`,
+                    });
+                }
+            }
+        }
+    }
+}
+
+// ── Proactive schema alignment check ─────────────────────────────────────────
+
+/**
+ * Warn when two DataFrames in the same file have identical column NAME sets but
+ * different column ORDER.  This is the silent bug behind most union/intersect
+ * column-position mix-ups, and we can catch it at definition time — before any
+ * set-op is even written.
+ *
+ * Issue id: SCHEMA_ALIGN_001  (WARNING)
+ * Reported on: the LATER DataFrame's creation line.
+ */
+function checkSchemaColumnAlignment(
+    history: BindingHistory,
+    lineMap: number[],
+    rawLines: string[],
+    issues: CodeIssue[],
+): void {
+    // Collect the latest non-null schema snapshot for each variable.
+    const snapshots: Array<{ name: string; columns: string[]; originalLine: number }> = [];
+    for (const [varName, bindings] of history) {
+        const latest = [...bindings].reverse().find(b => b.schema !== null && b.schema.length > 0);
+        if (!latest) { continue; }
+        const originalLine = lineMap[latest.definedAtLine] ?? latest.definedAtLine;
+        snapshots.push({ name: varName, columns: latest.schema!.map(f => f.name), originalLine });
+    }
+
+    // Sort ascending by line so 'i' is always earlier than 'j'.
+    snapshots.sort((a, b) => a.originalLine - b.originalLine);
+
+    for (let i = 0; i < snapshots.length; i++) {
+        for (let j = i + 1; j < snapshots.length; j++) {
+            const a = snapshots[i];
+            const b = snapshots[j];
+
+            // Column-name sets must be identical …
+            if (a.columns.length !== b.columns.length) { continue; }
+            const setA = new Set(a.columns);
+            if (!b.columns.every(c => setA.has(c))) { continue; }
+
+            // … but the order must differ.
+            if (a.columns.join(',') === b.columns.join(',')) { continue; }
+
+            // Respect # noqa: catalystops on the later DataFrame's line.
+            const lineText = rawLines[b.originalLine] ?? '';
+            if (/# noqa: catalystops\b/i.test(lineText)) { continue; }
+
+            issues.push({
+                id: 'SCHEMA_ALIGN_001',
+                severity: Severity.WARNING,
+                category: IssueCategory.CODE,
+                title: `"${b.name}" has the same columns as "${a.name}" but in a different order`,
+                description:
+                    `"${a.name}": [${a.columns.join(', ')}]\n` +
+                    `"${b.name}": [${b.columns.join(', ')}]\n` +
+                    `Positional operations (union, intersect, except) will silently compare wrong columns.`,
+                fix: {
+                    description: `Reorder "${b.name}" to match "${a.name}"`,
+                    code: `${b.name} = ${b.name}.select(${a.columns.map(c => `"${c}"`).join(', ')})`,
+                },
+                line: b.originalLine,
+                column: 0,
+                endLine: b.originalLine,
+                endColumn: lineText.length,
+                location: `Line ${b.originalLine + 1}`,
+            });
+        }
+    }
+}
+
 // ── Main export ───────────────────────────────────────────────────────────────
 
 /**
@@ -777,6 +1062,14 @@ export function validateSchema(code: string): CodeIssue[] {
 
     // Full-code join pass: handles all equality forms and multi-line paren-continuation joins
     checkAllJoins(code, history, issues);
+
+    // Full-code positional set-op pass: detects column-order mismatches in
+    // union(), intersect(), except(), subtract(), and their *All variants
+    checkAllPositionalSetOps(code, history, issues);
+
+    // Proactive pass: warn when any two DataFrames share column names but differ
+    // in column order, even before a set-op is written
+    checkSchemaColumnAlignment(history, lineMap, rawLines, issues);
 
     return issues;
 }

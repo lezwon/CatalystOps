@@ -98,4 +98,41 @@ spark.sql(f"SELECT * FROM {table}")
         const issues = analyzeCode(code);
         assert.ok(issues.length >= 4, `should detect at least 4 issues, got ${issues.length}`);
     });
+
+    test('should detect union() and suggest unionByName', () => {
+        const code = 'result = df1.union(df2)';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_UNION_001'), 'should detect union()');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_UNION_001')!.severity, 'warning');
+    });
+
+    test('should not flag unionByName()', () => {
+        const code = 'result = df1.unionByName(df2)';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_UNION_001'), 'should not flag unionByName()');
+    });
+
+    test('should not flag union() inside a comment', () => {
+        const code = '# result = df1.union(df2)';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_UNION_001'), 'should skip comment lines');
+    });
+
+    test('should suppress union() with noqa', () => {
+        const code = 'result = df1.union(df2)  # noqa: catalystops';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_UNION_001'), 'should respect noqa suppression');
+    });
+
+    test('should not flag intersect() (no generic warning — only schema-aware check fires)', () => {
+        const code = 'result = df1.intersect(df2)';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_INTERSECT_001'), 'CODE_INTERSECT_001 removed');
+    });
+
+    test('should not flag except() (no generic warning — only schema-aware check fires)', () => {
+        const code = 'result = df1.except(df2)';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_EXCEPT_001'), 'CODE_EXCEPT_001 removed');
+    });
 });

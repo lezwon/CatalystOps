@@ -6,7 +6,9 @@
 
 import * as vscode from 'vscode';
 import { analyzeCode } from './analysis/codeAnalyzer';
+import { validateSchema } from './analysis/schemaValidator';
 import { estimateStaticCost } from './analysis/staticCostEstimator';
+import { analyzeWriteOps } from './analysis/schemaTracker';
 import { createDiagnosticCollection, setCodeIssueDiagnostics, clearDiagnostics } from './providers/diagnosticsProvider';
 import { createStatusBar, setIdle, setAnalyzing, setResults, setError } from './views/statusBar';
 import { analyzeCost, showGeneratedScript, previewDryRunScript } from './commands/analyzeCost';
@@ -16,7 +18,7 @@ import { analyzeSelection } from './commands/analyzeSelection';
 import { showReport } from './commands/showReport';
 import { configureConnection } from './commands/configureConnection';
 import { createCodeLensProvider } from './providers/codeLensProvider';
-import { createHoverProvider } from './providers/hoverProvider';
+import { createHoverProvider, createWriteSchemaHoverProvider } from './providers/hoverProvider';
 import { createCodeActionProvider } from './providers/codeActionProvider';
 import { IssuesTreeDataProvider } from './views/issuesTreeView';
 import { Severity } from './models/types';
@@ -51,6 +53,7 @@ export function activate(context: vscode.ExtensionContext): void {
         context.subscriptions.push(
             vscode.languages.registerCodeLensProvider(pythonSelector, createCodeLensProvider()),
             vscode.languages.registerHoverProvider(pythonSelector, createHoverProvider()),
+            vscode.languages.registerHoverProvider(pythonSelector, createWriteSchemaHoverProvider()),
             vscode.languages.registerCodeActionsProvider(pythonSelector, createCodeActionProvider(), {
                 providedCodeActionKinds: [vscode.CodeActionKind.QuickFix],
             }),
@@ -109,10 +112,33 @@ export function activate(context: vscode.ExtensionContext): void {
 function runLocalAnalysis(document: vscode.TextDocument, issuesTreeProvider: IssuesTreeDataProvider): void {
     try {
         const code = document.getText();
-        const issues = analyzeCode(code);
+        const allIssues = [...analyzeCode(code), ...validateSchema(code)];
+
+        // When a schema-aware _002 issue fires on a line, suppress the generic _001
+        // warning for the same line to avoid duplicate diagnostics.
+        const schemaAwareUnionLines = new Set(
+            allIssues
+                .filter(i => /CODE_UNION_002/.test(i.id))
+                .map(i => i.line),
+        );
+        const dedupSeen = new Set<string>();
+        const issues = allIssues.filter(i => {
+            // Suppress generic CODE_UNION_001 when a schema-aware CODE_UNION_002 fired on the same line
+            if (i.id === 'CODE_UNION_001' && schemaAwareUnionLines.has(i.line)) {
+                return false;
+            }
+            // Deduplicate identical (id, line) pairs to prevent double-reporting
+            const key = `${i.id}:${i.line}`;
+            if (dedupSeen.has(key)) { return false; }
+            dedupSeen.add(key);
+            return true;
+        });
 
         const costEstimate = estimateStaticCost(code);
         issuesTreeProvider.updateCostEstimate(costEstimate);
+
+        const writeOps = analyzeWriteOps(code);
+        issuesTreeProvider.updateWriteOperations(writeOps);
 
         setCodeIssueDiagnostics(document.uri, issues);
         issuesTreeProvider.updateFromCodeIssues(issues);
