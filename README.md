@@ -1,6 +1,6 @@
 # CatalystOps — PySpark Optimizer
 
-**CatalystOps** catches PySpark performance issues before they hit production. It detects **30+ anti-patterns** locally in real time, validates **column names and types against your schema** at edit time, and runs **safe dry-run analysis** on a Databricks cluster or serverless compute to inspect Catalyst execution plans — all without executing Spark jobs or touching your data. Plan parsing is fully **Photon-aware** and detects cross-DataFrame repeated scans across your entire script.
+**CatalystOps** catches PySpark performance issues before they hit production. It detects **30+ anti-patterns** locally in real time, validates **column names, types, and schema alignment** at edit time, estimates **notebook compute costs** from source annotations, and runs **safe dry-run analysis** on a Databricks cluster or serverless compute to inspect Catalyst execution plans — all without executing Spark jobs or touching your data. Plan parsing is fully **Photon-aware** and detects cross-DataFrame repeated scans across your entire script.
 
 > **Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=CatalystOps.catalystops)**
 
@@ -10,11 +10,12 @@
 
 ## Why CatalystOps?
 
-PySpark makes it easy to write code that *works* but runs slowly or expensively at scale. Common pitfalls — `collect()` on large DataFrames, cartesian joins, missing broadcast hints, repeated table scans, and cache misconfigurations — often slip past code review and only surface as runaway cluster bills.
+PySpark makes it easy to write code that *works* but runs slowly or expensively at scale. Common pitfalls — `collect()` on large DataFrames, cartesian joins, missing broadcast hints, repeated table scans, union schema mismatches, and cache misconfigurations — often slip past code review and only surface as runaway cluster bills.
 
-CatalystOps gives you **two layers of analysis**:
+CatalystOps gives you **three layers of analysis**:
 
 - **Instant local checks** as you type — no cluster required
+- **Schema-aware checks** — column names, types, and set-operation alignment validated against schemas defined in the same file
 - **Deep plan analysis** on your actual Databricks cluster or serverless compute, parsing Catalyst physical and logical plans to catch issues that only appear at runtime
 
 ---
@@ -28,8 +29,8 @@ Detects anti-patterns instantly via regex-based pattern matching with full comme
 | Severity | Checks |
 |----------|--------|
 | **Critical** | `collect()`, `crossJoin()`, SQL injection via f-strings in `spark.sql()` |
-| **Warning** | UDFs, `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `dropDuplicates` on streaming DataFrame (cross-batch stateful dedup), `withColumn` in loops, non-deterministic UDFs in UDFs, deprecated pandas `.append()`, `.rdd` conversion, unnecessary `count()`, `checkpoint()` (triggers HDFS write), **unknown column names**, **type mismatches** |
-| **Info** | Schema inference, chained `.filter()`, `show()` in production, `display()` in production, `cache()` without `unpersist()`, `select("*")`, global `orderBy`, missing write mode, `pandas_udf`, `to_pandas_on_spark()`, `Table May Lack Statistics` |
+| **Warning** | `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `dropDuplicates` on streaming DataFrame (cross-batch stateful dedup), `withColumn` in loops, non-deterministic UDFs in UDFs, deprecated pandas `.append()`, `.rdd` conversion, unnecessary `count()`, `checkpoint()` (triggers HDFS write), **unknown column names**, **type mismatches** |
+| **Info** | UDF usage, schema inference, chained `.filter()`, `show()` in production, `display()` in production, `cache()` without `unpersist()`, `select("*")`, global `orderBy`, missing write mode, `pandas_udf`, `to_pandas_on_spark()`, `Table May Lack Statistics` |
 
 Each issue shows a **one-line explanation** and a **quick fix code block** on hover.
 
@@ -37,7 +38,7 @@ Each issue shows a **one-line explanation** and a **quick fix code block** on ho
 
 ### Schema Validation (No Cluster Required)
 
-When a `StructType` or DDL schema is defined in the same file, CatalystOps validates column references and function types at edit time — before code ever runs on a cluster.
+When a `StructType` or DDL schema is defined in the same file, CatalystOps validates column references, function types, and set-operation alignment at edit time — before code ever runs on a cluster.
 
 **Supported schema definition styles:**
 
@@ -62,7 +63,7 @@ df = spark.read.schema(schema).parquet(path)
 df = spark.readStream.schema(schema).json(path)
 ```
 
-**What gets checked:**
+**Column and type checks:**
 
 | Check | Issue ID | Example |
 |-------|----------|---------|
@@ -72,6 +73,20 @@ df = spark.readStream.schema(schema).json(path)
 | Type mismatch — date function on non-date column | `SCHEMA_TYPE_001` | `F.year("name")` where `name` is `StringType` |
 
 Column references are checked in `.select()`, `.drop()`, `.groupBy()`, `.orderBy()`, `.sort()`, `.partitionBy()`, `.withColumnRenamed()`, `col("name")`, and `df["name"]` expressions.
+
+**Set-operation schema checks:**
+
+| Check | Issue ID | Severity | Description |
+|-------|----------|----------|-------------|
+| `union()` — different column sets | `CODE_UNION_002` | Critical | Schemas don't match; suggests `unionByName(allowMissingColumns=True)` |
+| `union()` — same columns, different order | `CODE_UNION_002` | Critical | Rows silently matched by wrong position |
+| `union()` — schemas fully compatible | `CODE_UNION_002_MATCH` | Suggestion | Safe, but `unionByName()` is more robust |
+| `intersect()` / `intersectAll()` — same columns, different order | `CODE_INTERSECT_002` | Critical | Rows compared by wrong column position |
+| `except()` / `exceptAll()` / `subtract()` — same columns, different order | `CODE_EXCEPT_002` | Critical | Rows compared by wrong column position |
+| Two DataFrames with same column names but different order | `SCHEMA_ALIGN_001` | Warning | Proactive alert at definition time — before any set-op is written |
+| Join condition type mismatch | `SCHEMA_JOIN_001` | Warning | e.g. joining `INT` vs `STRING` on the same key |
+
+> `intersect()`, `except()`, and `subtract()` only flag **order mismatches** (same column set, different order) — the silent wrong-result bug. Completely different column sets are not flagged since that produces an obvious runtime error.
 
 **Schema propagation** — schemas flow through transformations:
 
@@ -97,6 +112,47 @@ df.select("legacy_col")  # noqa: catalystops
 ```
 
 > Schema validation only fires when a schema is defined in the **same file**. DataFrames loaded from external sources (`spark.table()`, `spark.sql()`, `spark.read` without `.schema()`) are silently skipped — no false positives.
+
+---
+
+### Static Cost Estimation (No Cluster Required)
+
+Annotate your Python file with `# @compute:` and `# @size:` to get an instant dollar estimate directly in the editor — no cluster connection needed.
+
+**Annotation format:**
+
+```python
+# @compute: nodes=4, cores=2, memory=16GB, rate=0.25
+
+big_df = spark.read.parquet("s3://bucket/events")  # @size: 50GB
+lookup = spark.read.csv("s3://bucket/lookup")       # @size: 200MB
+```
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `nodes` | Yes | Number of worker nodes |
+| `cores` | Yes | Cores per node |
+| `memory` | Yes | Memory per node (`GB`, `MB`, `KB`, `TB`) |
+| `rate` | Yes | Total cluster cost in $/hr |
+| `overhead` | No | Multiplier for full-notebook cost beyond scans (default `2.0`) |
+
+**How the estimate is calculated:**
+
+```
+scan_hours = total_bytes / 500 MB/s / 3600
+scan_cost  = scan_hours × rate
+total_cost = scan_cost × overhead_factor
+```
+
+The 500 MB/s throughput is a conservative Delta/Parquet scan assumption. The `overhead` multiplier (default `2.0`) accounts for transforms, shuffles, and writes on top of the raw scan cost.
+
+**What you see:**
+
+- **CodeLens** — appears above the `# @compute:` line:
+  ```
+  $(circuit-board) Estimated cost: ~$0.0018  (50.2 GB @ $0.25/hr)
+  ```
+- **Sidebar panel** — a collapsible "Estimated cost" group in the Issues tree showing total data, cluster spec, and rate
 
 ---
 
@@ -174,9 +230,9 @@ When a Databricks connection is configured, CatalystOps submits a neutralized ve
 
 - **Inline diagnostics** — squiggly underlines with exact line/column positions, visible in the Problems panel
 - **Hover tooltips** — clean markdown cards with a one-sentence explanation and a `Quick fix:` code block for every detected issue
-- **CodeLens** — inline warnings above high-risk operations (`collect()`, `repartition(1)`, `coalesce(1)`, `checkpoint()`)
+- **CodeLens** — inline warnings above high-risk operations (`collect()`, `repartition(1)`, `coalesce(1)`, `checkpoint()`) and estimated cost above `# @compute:` annotations
 - **Quick Fix** actions (`⌘.` / `Ctrl+.`) — context-aware code suggestions
-- **Issues tree view** — sidebar panel listing all local and dry-run issues by severity with line numbers
+- **Issues tree view** — sidebar panel listing all local and dry-run issues by severity with line numbers, plus estimated cost and write operation summaries
 - **Progress steps** — live sidebar progress showing each analysis stage (local analysis → cluster check → script generation → cluster run → parsing)
 - **Status bar** — real-time issue counts (critical / warning / info)
 - **HTML reports** — shareable full analysis breakdown
@@ -277,6 +333,21 @@ Leave **Cluster ID blank** in the configuration wizard — CatalystOps automatic
 
 ## Cost Estimation
 
+### Static Annotation-Based Estimation
+
+Add `# @compute:` and `# @size:` annotations to get an instant estimate without a cluster:
+
+```python
+# @compute: nodes=4, cores=2, memory=16GB, rate=0.25, overhead=2.0
+
+events = spark.read.parquet("s3://bucket/events")  # @size: 50GB
+lookup = spark.read.csv("s3://bucket/lookup")       # @size: 200MB
+```
+
+The estimate appears as a CodeLens above the `# @compute:` line and in the sidebar panel. The `overhead` factor (default `2.0`) multiplies the raw scan estimate to model the full notebook cost including transforms, shuffles, and writes.
+
+### Cluster Dry-Run Estimation
+
 After each dry run, CatalystOps estimates the cost of the analysis using the best available signal:
 
 | Strategy | When used | How |
@@ -309,23 +380,28 @@ Local `.py` files imported by your script are automatically detected and bundled
 
 ```
 ┌─────────────────┐     ┌──────────────────────┐
-│  Python file     │────▶│  Local Code Analyzer  │──▶ 30+ anti-pattern checks
-│  (active editor) │     │  (codeAnalyzer.ts)    │    with line/column positions
+│  Python file    │────▶│  Local Code Analyzer │──▶ 30+ anti-pattern checks
+│  (active editor)│     │  (codeAnalyzer.ts)   │    with line/column positions
 └─────────────────┘     └──────────┬───────────┘
                                    │
                          ┌─────────▼───────────┐
-                         │  Schema Validator    │──▶ column-name + type checks
-                         │  schemaExtractor.ts  │    StructType / DDL schemas
-                         │  schemaTracker.ts    │    propagated through transforms
-                         │  schemaValidator.ts  │    SCHEMA_COL_001 / TYPE_001
+                         │  Schema Validator   │──▶ column-name + type checks
+                         │  schemaExtractor.ts │    StructType / DDL schemas
+                         │  schemaTracker.ts   │    propagated through transforms
+                         │  schemaValidator.ts │    SCHEMA_COL/TYPE/ALIGN/JOIN
+                         └─────────────────────┘    CODE_UNION/INTERSECT/EXCEPT_002
+                                   │
+                         ┌─────────▼───────────┐
+                         │  Static Cost Est.   │──▶ # @compute: / # @size:
+                         │  staticCostEstimator│    CodeLens + sidebar panel
                          └─────────────────────┘
-        │
-        ▼  (if Databricks configured)
+                                   │
+                                   ▼  (if Databricks configured)
 ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────────────┐
-│  Safety Wrapper   │────▶│  Cluster Script   │────▶│  Databricks               │
-│  neutralize       │     │  + local file     │     │  Jobs API (dry run)       │
-│  writes/actions   │     │  bundling         │     │  cluster or serverless    │
-└──────────────────┘     └──────────────────┘     └──────────┬────────────────┘
+│  Safety Wrapper  │────▶│  Cluster Script  │────▶│  Databricks              │
+│  neutralize      │     │  + local file    │     │  Jobs API (dry run)      │
+│  writes/actions  │     │  bundling        │     │  cluster or serverless   │
+└──────────────────┘     └──────────────────┘     └──────────┬───────────────┘
                                                              │  run_page_url → toast
                     ┌────────────────────┐                   │  "Open in Databricks"
                     │  Plan Parser       │◀──────────────────┘
@@ -335,9 +411,9 @@ Local `.py` files imported by your script are automatically detected and bundled
                     └────────┬───────────┘
                              │
               ┌──────────────▼──────────────┐     ┌──────────────────────────┐
-              │  VS Code Diagnostics +       │     │  Billing Query (opt-in)   │
-              │  Hover Cards + Tree View +   │     │  system.billing.usage     │
-              │  Status Bar + HTML Report    │     │  → actual DBU cost toast  │
+              │  VS Code Diagnostics +      │     │  Billing Query (opt-in)  │
+              │  Hover Cards + Tree View +  │     │  system.billing.usage    │
+              │  Status Bar + HTML Report   │     │  → actual DBU cost toast │
               └─────────────────────────────┘     └──────────────────────────┘
 ```
 
@@ -384,9 +460,10 @@ catalyst-ops/
 │   ├── logger.ts                 # Output channel logger (debug-gated for diagnostics)
 │   ├── analysis/
 │   │   ├── codeAnalyzer.ts       # 30+ anti-pattern definitions + regex scanner
-│   │   ├── schemaExtractor.ts    # Parses StructType / DDL schemas from source
+│   │   ├── schemaExtractor.ts    # Parses StructType / DDL schemas; continuation-line joining
 │   │   ├── schemaTracker.ts      # Propagates schemas through DF transformations
-│   │   ├── schemaValidator.ts    # Column-name + type checks (SCHEMA_COL/TYPE_001)
+│   │   ├── schemaValidator.ts    # Column-name, type, set-op, and join checks
+│   │   ├── staticCostEstimator.ts # @compute / @size annotation parser + cost formula
 │   │   ├── planParser.ts         # Catalyst plan → join/shuffle/cache/scan issues
 │   │   ├── costModel.ts          # Heuristic cost scoring and DBU estimation
 │   │   ├── clusterScript.ts      # Script generation, local file bundling, plan capture
@@ -408,13 +485,14 @@ catalyst-ops/
 │   │   └── codeActionProvider.ts
 │   └── views/
 │       ├── statusBar.ts
-│       └── issuesTreeView.ts     # Sidebar tree with progress tracking
+│       └── issuesTreeView.ts     # Sidebar tree with progress, cost, and write summaries
 ├── test/
 │   └── suite/
 │       ├── codeAnalyzer.test.ts
 │       ├── planParser.test.ts
 │       ├── safetyWrapper.test.ts
-│       └── schemaValidator.test.ts
+│       ├── schemaValidator.test.ts
+│       └── staticCostEstimator.test.ts
 └── media/
     └── icon.svg
 ```
