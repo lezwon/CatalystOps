@@ -486,6 +486,307 @@ df2.select("nonexistent_col")
         assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_COL_001').length, 0,
             'unknown schema after join should not produce false positives');
     });
+});
+
+// ── 7. Join Condition Validation ──────────────────────────────────────────────
+
+suite('Join Condition Validation', () => {
+    const makeCode = (joinLine: string) => `
+schema1 = StructType([StructField("id", IntegerType()), StructField("name", StringType())])
+schema2 = StructType([StructField("id", IntegerType()), StructField("score", DoubleType())])
+df1 = spark.read.schema(schema1).json(path)
+df2 = spark.read.schema(schema2).json(path)
+${joinLine}
+`.trim();
+
+    test('valid string join key produces no issues', () => {
+        const issues = validateSchema(makeCode('result = df1.join(df2, "id")'));
+        assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_COL_001').length, 0,
+            'valid join key in both DFs should not be flagged');
+    });
+
+    test('string join key missing from left DF is flagged', () => {
+        const issues = validateSchema(makeCode('result = df1.join(df2, "bad_col")'));
+        assert.ok(issues.some(i => i.id === 'SCHEMA_COL_001' && i.description.includes('"df1"') && i.description.includes('"bad_col"')),
+            'unknown join key should be flagged against left DF');
+    });
+
+    test('string join key missing from right DF is flagged', () => {
+        // "name" is in df1 but not df2
+        const issues = validateSchema(makeCode('result = df1.join(df2, "name")'));
+        assert.ok(issues.some(i => i.id === 'SCHEMA_COL_001' && i.description.includes('"df2"') && i.description.includes('"name"')),
+            'unknown join key should be flagged against right DF');
+    });
+
+    test('list join keys — valid keys produce no issues', () => {
+        const issues = validateSchema(makeCode('result = df1.join(df2, ["id"])'));
+        assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_COL_001').length, 0,
+            'valid list join key should not be flagged');
+    });
+
+    test('list join keys — bad key is flagged', () => {
+        const issues = validateSchema(makeCode('result = df1.join(df2, ["id", "bad_col"])'));
+        assert.ok(issues.some(i => i.id === 'SCHEMA_COL_001' && i.description.includes('"bad_col"')),
+            'invalid column in list join key should be flagged');
+    });
+
+    test('on= keyword argument is validated', () => {
+        const issues = validateSchema(makeCode('result = df1.join(df2, how="left", on="bad_col")'));
+        assert.ok(issues.some(i => i.id === 'SCHEMA_COL_001' && i.description.includes('"bad_col"')),
+            'on= keyword with unknown column should be flagged');
+    });
+
+    test('how= without on= does not produce false positives', () => {
+        // No join condition to validate, just a how= arg
+        const issues = validateSchema(makeCode('result = df1.join(df2, how="left")'));
+        assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_COL_001').length, 0,
+            'join with only how= and no condition should not be flagged');
+    });
+
+    test('bracket-access join condition is not double-reported', () => {
+        // df1["bad"] == df2["id"] — bad on left, valid on right
+        // Should get exactly 1 issue (for df1["bad"]), not 2
+        const issues = validateSchema(makeCode('result = df1.join(df2, df1["bad"] == df2["id"])'));
+        const colIssues = issues.filter(i => i.id === 'SCHEMA_COL_001');
+        assert.strictEqual(colIssues.length, 1, 'only the invalid bracket-access column should be flagged');
+        assert.ok(colIssues[0].description.includes('"bad"'));
+    });
+
+    test('bracket-equality join condition with incompatible types is flagged as SCHEMA_JOIN_001', () => {
+        // df["name"] (string) == df1_spark["col1"] (boolean) — should emit SCHEMA_JOIN_001
+        const code = `
+schema1 = StructType([StructField('col1', BooleanType()), StructField('col2', StringType())])
+schema2 = StructType([StructField('name', StringType()), StructField('id', IntegerType())])
+df1_spark = spark.createDataFrame(data, schema1)
+df = spark.createDataFrame(data2, schema2)
+result = df.join(df1_spark, df["name"] == df1_spark["col1"])
+`.trim();
+        const issues = validateSchema(code);
+        const joinIssues = issues.filter(i => i.id === 'SCHEMA_JOIN_001');
+        assert.strictEqual(joinIssues.length, 1, 'type mismatch in bracket-equality join should be flagged');
+        assert.ok(joinIssues[0].description.includes('string'), 'description should mention string type');
+        assert.ok(joinIssues[0].description.includes('boolean'), 'description should mention boolean type');
+    });
+
+    test('bracket-equality join condition with matching types produces no SCHEMA_JOIN_001', () => {
+        const code = `
+schema1 = StructType([StructField('name', StringType()), StructField('id', IntegerType())])
+schema2 = StructType([StructField('name', StringType()), StructField('score', DoubleType())])
+df1 = spark.createDataFrame(data, schema1)
+df2 = spark.createDataFrame(data2, schema2)
+result = df1.join(df2, df1["name"] == df2["name"])
+`.trim();
+        const issues = validateSchema(code);
+        assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_JOIN_001').length, 0,
+            'same types in bracket-equality join should not be flagged');
+    });
+
+    test('F.col() join condition does not flag column that belongs to right DataFrame', () => {
+        // F.col("name") belongs to df (right), not df_spark (left) — should not be flagged
+        const code = `
+schema1 = StructType([StructField('col1', StringType()), StructField('col2', IntegerType())])
+schema2 = StructType([StructField('name', StringType()), StructField('id', IntegerType())])
+df_spark = spark.createDataFrame(data, schema1)
+df = spark.createDataFrame(data2, schema2)
+joined_df = df_spark.join(df, F.col("col1") == F.col("name"))
+`.trim();
+        const issues = validateSchema(code);
+        assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_COL_001').length, 0,
+            'F.col() referencing right DF column should not be flagged as unknown');
+    });
+
+    test('F.col() join condition still flags truly unknown column', () => {
+        const code = `
+schema1 = StructType([StructField('col1', StringType()), StructField('col2', IntegerType())])
+schema2 = StructType([StructField('name', StringType()), StructField('id', IntegerType())])
+df_spark = spark.createDataFrame(data, schema1)
+df = spark.createDataFrame(data2, schema2)
+joined_df = df_spark.join(df, F.col("col1") == F.col("nonexistent"))
+`.trim();
+        const issues = validateSchema(code);
+        assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_COL_001').length, 1,
+            'column absent from both DataFrames should still be flagged');
+        assert.ok(issues[0].description.includes('"nonexistent"'));
+    });
+
+    test('alias-qualified F.col() in join condition with matching types produces no issues', () => {
+        // col2 is IntegerType in df1_spark; id is IntegerType in df — matching → no SCHEMA_JOIN_001
+        const code = `
+schema1 = StructType([StructField('col1', BooleanType()), StructField('col2', IntegerType())])
+schema2 = StructType([StructField('name', StringType()), StructField('id', IntegerType())])
+df1_spark = spark.createDataFrame(data, schema1)
+df = spark.createDataFrame(data2, schema2)
+joined_df = df1_spark.alias("a").join(df.alias("b"), F.col("a.col2") == F.col("b.id"), "outer")
+`.trim();
+        const issues = validateSchema(code);
+        assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_COL_001').length, 0,
+            'alias-qualified column references should not be flagged as unknown');
+        assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_JOIN_001').length, 0,
+            'matching types should not produce a type mismatch');
+    });
+
+    test('attribute-access join condition with type mismatch is flagged as SCHEMA_JOIN_001', () => {
+        // df.name is string, df1_spark.col1 is boolean → mismatch
+        const code = `
+schema1 = StructType([StructField('col1', BooleanType()), StructField('col2', StringType())])
+schema2 = StructType([StructField('name', StringType()), StructField('id', IntegerType())])
+df1_spark = spark.createDataFrame(data, schema1)
+df = spark.createDataFrame(data2, schema2)
+result = df1_spark.join(df, df.name == df1_spark.col1)
+`.trim();
+        const issues = validateSchema(code);
+        const joinIssues = issues.filter(i => i.id === 'SCHEMA_JOIN_001');
+        assert.strictEqual(joinIssues.length, 1, 'attribute-access type mismatch should be flagged');
+        assert.ok(joinIssues[0].description.includes('string'), 'should mention string type');
+        assert.ok(joinIssues[0].description.includes('boolean'), 'should mention boolean type');
+    });
+
+    test('attribute-access join condition with unknown column is flagged as SCHEMA_COL_001', () => {
+        // col16 does not exist in df1_spark → should emit SCHEMA_COL_001
+        const code = `
+schema1 = StructType([StructField('col1', BooleanType()), StructField('col2', StringType())])
+schema2 = StructType([StructField('name', StringType()), StructField('id', IntegerType())])
+df1_spark = spark.createDataFrame(data, schema1)
+df = spark.createDataFrame(data2, schema2)
+result = df1_spark.join(df, df.name == df1_spark.col16)
+`.trim();
+        const issues = validateSchema(code);
+        const colIssues = issues.filter(i => i.id === 'SCHEMA_COL_001');
+        assert.strictEqual(colIssues.length, 1, 'unknown column in attribute-access join should be flagged');
+        assert.ok(colIssues[0].description.includes('"col16"'));
+    });
+
+    test('SCHEMA_JOIN_001 issue has line-relative column position', () => {
+        // The column and endColumn must be within the line length (not absolute code offsets)
+        const code = `
+schema1 = StructType([StructField('col1', BooleanType()), StructField('col2', StringType())])
+schema2 = StructType([StructField('name', StringType()), StructField('id', IntegerType())])
+df1_spark = spark.createDataFrame(data, schema1)
+df = spark.createDataFrame(data2, schema2)
+result = df1_spark.join(df, df.name == df1_spark.col1)
+`.trim();
+        const issues = validateSchema(code);
+        const joinIssues = issues.filter(i => i.id === 'SCHEMA_JOIN_001');
+        assert.strictEqual(joinIssues.length, 1);
+        const issue = joinIssues[0];
+        const lineText = code.split('\n')[issue.line];
+        assert.ok(issue.column >= 0, 'column should be non-negative');
+        assert.ok(issue.column < lineText.length, `column ${issue.column} should be within line length ${lineText.length}`);
+        assert.ok((issue.endColumn ?? 0) <= lineText.length, `endColumn should not exceed line length`);
+    });
+
+    test('unqualified F.col() join condition with type mismatch is flagged as SCHEMA_JOIN_001', () => {
+        // col1 is boolean in df1_spark, name is string in df → mismatch
+        const code = `
+schema1 = StructType([StructField('col1', BooleanType()), StructField('col2', StringType())])
+schema2 = StructType([StructField('name', StringType()), StructField('id', IntegerType())])
+df1_spark = spark.createDataFrame(data, schema1)
+df = spark.createDataFrame(data2, schema2)
+joined_df = df1_spark.join(df, F.col("col1") == F.col("name"))
+`.trim();
+        const issues = validateSchema(code);
+        const joinIssues = issues.filter(i => i.id === 'SCHEMA_JOIN_001');
+        assert.strictEqual(joinIssues.length, 1, 'unqualified F.col() type mismatch should be flagged');
+        assert.ok(joinIssues[0].description.includes('boolean'), 'should mention boolean type');
+        assert.ok(joinIssues[0].description.includes('string'), 'should mention string type');
+    });
+
+    test('alias-qualified F.col() join condition with type mismatch is flagged as SCHEMA_JOIN_001', () => {
+        // col1 is boolean in df1_spark (alias "a"), name is string in df (alias "b") → mismatch
+        const code = `
+schema1 = StructType([StructField('col1', BooleanType()), StructField('col2', StringType())])
+schema2 = StructType([StructField('name', StringType()), StructField('id', IntegerType())])
+df1_spark = spark.createDataFrame(data, schema1)
+df = spark.createDataFrame(data2, schema2)
+joined_df = df1_spark.alias("a").join(df.alias("b"), F.col("a.col1") == F.col("b.name"), "outer")
+`.trim();
+        const issues = validateSchema(code);
+        const joinIssues = issues.filter(i => i.id === 'SCHEMA_JOIN_001');
+        assert.strictEqual(joinIssues.length, 1, 'alias-qualified F.col() type mismatch should be flagged');
+        assert.ok(joinIssues[0].description.includes('boolean'), 'should mention boolean type');
+        assert.ok(joinIssues[0].description.includes('string'), 'should mention string type');
+    });
+
+    test('alias-qualified multi-line F.col() join condition with type mismatch is flagged', () => {
+        // Same as above but join spans multiple lines (paren continuation)
+        const code = `
+schema1 = StructType([StructField('col1', BooleanType()), StructField('col2', StringType())])
+schema2 = StructType([StructField('name', StringType()), StructField('id', IntegerType())])
+df1_spark = spark.createDataFrame(data, schema1)
+df = spark.createDataFrame(data2, schema2)
+joined_df = df1_spark.alias("a").join(
+    df.alias("b"), F.col("a.col1") == F.col("b.name"), "outer"
+)
+`.trim();
+        const issues = validateSchema(code);
+        const joinIssues = issues.filter(i => i.id === 'SCHEMA_JOIN_001');
+        assert.strictEqual(joinIssues.length, 1, 'multi-line alias-qualified type mismatch should be flagged');
+        assert.ok(joinIssues[0].description.includes('boolean'));
+        assert.ok(joinIssues[0].description.includes('string'));
+    });
+
+    test('right DF with no known schema skips right-side check silently', () => {
+        const code = `
+schema1 = StructType([StructField("id", IntegerType())])
+df1 = spark.read.schema(schema1).json(path)
+result = df1.join(external_df, "id")
+`.trim();
+        const issues = validateSchema(code);
+        assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_COL_001').length, 0,
+            'unknown right DF schema should not produce false positives');
+    });
+
+    test('matching types on join key produce no type issue', () => {
+        const issues = validateSchema(makeCode('result = df1.join(df2, "id")'));
+        assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_JOIN_001').length, 0,
+            'same type on both sides should not be flagged');
+    });
+
+    test('incompatible types on join key are flagged as SCHEMA_JOIN_001', () => {
+        // "name" is StringType in df1, "score" is DoubleType in df2 — but let us use a key
+        // that exists in both with different types: we need a new setup
+        const code = `
+schema1 = StructType([StructField("key", StringType())])
+schema2 = StructType([StructField("key", IntegerType())])
+df1 = spark.read.schema(schema1).json(path)
+df2 = spark.read.schema(schema2).json(path)
+result = df1.join(df2, "key")
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(issues.some(i => i.id === 'SCHEMA_JOIN_001' && i.description.includes('"key"')),
+            'incompatible join key types should be flagged');
+    });
+
+    test('both-numeric join key types are not flagged', () => {
+        const code = `
+schema1 = StructType([StructField("id", IntegerType())])
+schema2 = StructType([StructField("id", LongType())])
+df1 = spark.read.schema(schema1).json(path)
+df2 = spark.read.schema(schema2).json(path)
+result = df1.join(df2, "id")
+`.trim();
+        const issues = validateSchema(code);
+        assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_JOIN_001').length, 0,
+            'integer vs long is numeric-compatible and should not be flagged');
+    });
+
+    test('type mismatch on list join key is flagged', () => {
+        const code = `
+schema1 = StructType([StructField("id", IntegerType()), StructField("key", StringType())])
+schema2 = StructType([StructField("id", IntegerType()), StructField("key", TimestampType())])
+df1 = spark.read.schema(schema1).json(path)
+df2 = spark.read.schema(schema2).json(path)
+result = df1.join(df2, ["id", "key"])
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(issues.some(i => i.id === 'SCHEMA_JOIN_001' && i.description.includes('"key"')),
+            'type mismatch in list join key should be flagged');
+        assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_JOIN_001' && i.description.includes('"id"')).length, 0,
+            'matching id type should not be flagged');
+    });
+});
+
+suite('Edge Cases', () => {
 
     test('multi-line select still reports unknown columns', () => {
         const code = `

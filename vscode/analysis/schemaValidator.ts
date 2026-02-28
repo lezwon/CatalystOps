@@ -14,6 +14,7 @@ import {
     extractStructTypeSchemas,
     extractDdlSchemas,
     suggestColumns,
+    findMatchingParen,
     ParsedSchema,
     SchemaField,
 } from './schemaExtractor';
@@ -218,6 +219,17 @@ function lookBackForDfContext(
             }
         }
 
+        // Handle bare identifier starting a chain: "df1_spark \" or just "df1_spark"
+        // (no assignment, no dot — the identifier IS the DataFrame being chained on)
+        const bareIdMatch = /^\s*(\w+)\s*\\?\s*$/.exec(prevLine.replace(/#.*$/, ''));
+        if (bareIdMatch) {
+            const candidate = bareIdMatch[1];
+            if (!['F', 'functions', 'spark', 'sc', 'sqlContext', 'col', 'lit'].includes(candidate)) {
+                const schema = schemaAtLine(history, candidate, joinedIdx);
+                if (schema !== null) { return { dfVar: candidate, schema }; }
+            }
+        }
+
         // Stop looking if this previous line is not itself a continuation
         const trimmed = prevLine.trim();
         if (!trimmed.endsWith('\\') && !trimmed.startsWith('.')) { break; }
@@ -258,7 +270,8 @@ function checkMethodColArgs(
     for (const col of cols) {
         if (!dfInfo.schema.some(f => f.name === col)) {
             const colStart = line.indexOf(`"${col}"`, openIdx);
-            const colCol = colStart !== -1 ? colStart + 1 : openIdx + 1; // inside the quotes
+            const colCol = colStart !== -1 ? colStart + 1 : openIdx + 1;
+            if (columnsAddedBeforePos(line, colStart !== -1 ? colStart : openIdx).has(col)) { continue; }
             issues.push(makeColumnIssue(col, dfInfo.dfVar, dfInfo.schema, reportLine, colCol));
         }
     }
@@ -313,12 +326,32 @@ function checkColFunction(
     const dfInfo = dfContext ?? findDfSchemaForLine(line, lineIdx, history);
     if (!dfInfo) { return; }
 
+    // For join lines, unqualified F.col("x") may refer to columns in the right DataFrame.
+    // Look up the right DF's schema so we don't flag columns that belong to it.
+    let joinRightSchema: ParsedSchema | null = null;
+    const joinM = /\.join\s*\(/.exec(line);
+    if (joinM) {
+        const openIdx = line.indexOf('(', joinM.index + joinM[0].length - 1);
+        if (openIdx !== -1) {
+            const closeIdx = findCloseParenSimple(line, openIdx);
+            const firstArg = splitTopLevelArgs(line.substring(openIdx + 1, closeIdx))[0]?.trim() ?? '';
+            const rightDfName = /^(\w+)$/.exec(firstArg)?.[1];
+            if (rightDfName) { joinRightSchema = schemaAtLine(history, rightDfName, lineIdx); }
+        }
+    }
+
     const colFuncRe = /(?<!\w)col\s*\(\s*["']([^"'\\]*)["']\s*\)/g;
     let m: RegExpExecArray | null;
     while ((m = colFuncRe.exec(line)) !== null) {
         const col = m[1];
         if (col === '*') { continue; }
+        // Dotted names like "alias.column" are qualified references — skip, we can't resolve aliases
+        if (col.includes('.')) { continue; }
         if (!dfInfo.schema.some(f => f.name === col)) {
+            // Skip if the column was added by an earlier .withColumn in the same chain
+            if (columnsAddedBeforePos(line, m.index).has(col)) { continue; }
+            // Skip if the column exists in the right DataFrame of a join condition
+            if (joinRightSchema?.some(f => f.name === col)) { continue; }
             issues.push(makeColumnIssue(col, dfInfo.dfVar, dfInfo.schema, reportLine, m.index));
         }
     }
@@ -340,6 +373,8 @@ function checkBracketAccess(
     while ((m = bracketRe.exec(line)) !== null) {
         const varName = m[1];
         const col = m[2];
+        // Dotted names are qualified references — skip
+        if (col.includes('.')) { continue; }
         const schema = schemaAtLine(history, varName, lineIdx);
         if (!schema) { continue; }
         if (!schema.some(f => f.name === col)) {
@@ -453,6 +488,246 @@ function splitTopLevelArgs(argsText: string): string[] {
     return tokens.filter(t => t.length > 0);
 }
 
+/**
+ * Scan the full code for .join() calls — including multi-line paren-continuation ones —
+ * and validate join conditions for column existence and type compatibility.
+ *
+ * Handles all equality condition forms:
+ *   "col"                                  → string key (existence + type)
+ *   ["col1", "col2"]                       → list keys (existence + type each)
+ *   df1["x"] == df2["y"]                   → bracket equality (type)
+ *   df1.x == df2.y                         → attribute access (type)
+ *   F.col("x") == F.col("y")               → unqualified F.col() (type)
+ *   F.col("a.x") == F.col("b.y")           → alias-qualified F.col() (type)
+ */
+function checkAllJoins(
+    code: string,
+    history: BindingHistory,
+    issues: CodeIssue[],
+): void {
+    const NON_DF = new Set(['F', 'functions', 'spark', 'sc', 'sqlContext', 'col', 'lit']);
+    const joinRe = /\.join\s*\(/g;
+    let jm: RegExpExecArray | null;
+
+    while ((jm = joinRe.exec(code)) !== null) {
+        const openPos = jm.index + jm[0].length - 1;
+        const closePos = findMatchingParen(code, openPos);
+        if (closePos === -1) { continue; }
+
+        // 0-based raw line where .join( appears
+        const reportLine = code.substring(0, jm.index).split('\n').length - 1;
+        if (/# noqa: catalystops\b/i.test(code.split('\n')[reportLine] ?? '')) { continue; }
+
+        // Left DataFrame: identifier immediately before .join( (strip .alias("x") first)
+        const beforeJoin = code.substring(0, jm.index).replace(/\.\s*alias\s*\(\s*["']\w+["']\s*\)\s*$/, '');
+        const leftDfM = /\b(\w+)\s*$/.exec(beforeJoin);
+        if (!leftDfM || NON_DF.has(leftDfM[1])) { continue; }
+        const leftDfVar = leftDfM[1];
+        const leftSchema = schemaAtLine(history, leftDfVar, reportLine);
+        if (!leftSchema) { continue; }
+
+        // Args (full text, may span multiple raw lines)
+        const argsText = code.substring(openPos + 1, closePos);
+        const topArgs = splitTopLevelArgs(argsText);
+        if (topArgs.length < 2) { continue; }
+
+        // Right DataFrame (first positional arg; may be df2 or df2.alias("b"))
+        const rightDfRaw = topArgs[0].trim();
+        const rightDfName = /^(\w+)$/.exec(rightDfRaw)?.[1]
+            ?? /^(\w+)\s*\./.exec(rightDfRaw)?.[1];
+        const rightSchema = rightDfName ? schemaAtLine(history, rightDfName, reportLine) : null;
+
+        // Build alias map: scan the expression lines for .alias("x") calls
+        const lineStart = code.lastIndexOf('\n', jm.index) + 1;
+        const exprText = code.substring(lineStart, closePos + 1);
+        const aliasMap = new Map<string, ParsedSchema>();
+        const aliasRe = /\b(\w+)\.alias\s*\(\s*["'](\w+)["']\s*\)/g;
+        let am: RegExpExecArray | null;
+        while ((am = aliasRe.exec(exprText)) !== null) {
+            if (NON_DF.has(am[1])) { continue; }
+            const s = schemaAtLine(history, am[1], reportLine);
+            if (s) { aliasMap.set(am[2], s); }
+        }
+
+        // Resolve join condition arg (on= keyword takes priority)
+        let condArg: string | null = null;
+        for (const arg of topArgs.slice(1)) {
+            const kwm = /^on\s*=\s*([\s\S]+)$/.exec(arg.trim());
+            if (kwm) { condArg = kwm[1].trim(); break; }
+        }
+        if (condArg === null) {
+            const second = topArgs[1].trim();
+            if (second && !/^\w+\s*=/.test(second)) { condArg = second; }
+        }
+        if (!condArg) { continue; }
+
+        // ── Position helper ───────────────────────────────────────────────────
+        // condArg was extracted via splitTopLevelArgs + trim(); find it in argsText
+        // to anchor match positions back into the full code string.
+        const condArgIdx = argsText.indexOf(condArg);
+        const condArgStartInCode = openPos + 1 + (condArgIdx !== -1 ? condArgIdx : 0);
+
+        /**
+         * Given a match `m` on `condArg` and the column name length to highlight,
+         * return the correct { line, col, endCol } for a VS Code diagnostic.
+         * `matchOffset` is `m.index`; `highlightLen` is the text length to underline.
+         */
+        const pos = (matchOffset: number, highlightLen: number) => {
+            const absStart = condArgStartInCode + matchOffset;
+            const ln = code.substring(0, absStart).split('\n').length - 1;
+            const lnStart = code.lastIndexOf('\n', absStart) + 1;
+            const lnEnd = code.indexOf('\n', absStart);
+            const lnLen = (lnEnd !== -1 ? lnEnd : code.length) - lnStart;
+            const col = absStart - lnStart;
+            return { line: ln, col, endCol: Math.min(col + highlightLen, lnLen) };
+        };
+
+        // ── Helper: resolve name (alias or direct DF var) → schema ───────────
+        const resolve = (name: string): ParsedSchema | null =>
+            aliasMap.get(name) ?? schemaAtLine(history, name, reportLine);
+
+        // ── Helper: emit SCHEMA_JOIN_001 ──────────────────────────────────────
+        const emitTypeMismatch = (
+            lName: string, lCol: string, lType: string,
+            rName: string, rCol: string, rType: string,
+            matchOffset: number, matchLen: number,
+        ) => {
+            if (lType === rType) { return; }
+            if (NUMERIC_TYPES.has(lType) && NUMERIC_TYPES.has(rType)) { return; }
+            const p = pos(matchOffset, matchLen);
+            issues.push({
+                id: 'SCHEMA_JOIN_001',
+                severity: Severity.WARNING,
+                category: IssueCategory.CODE,
+                title: `Join condition type mismatch: "${lCol}" (${lType}) vs "${rCol}" (${rType})`,
+                description: `Join condition compares "${lCol}" (${lType} in "${lName}") with "${rCol}" (${rType} in "${rName}"). Joining on incompatible types may fail or produce unexpected results.`,
+                fix: { description: `Cast "${lCol}" or "${rCol}" to the same type before joining.` },
+                line: p.line,
+                column: p.col,
+                endLine: p.line,
+                endColumn: p.endCol,
+                location: `Line ${p.line + 1}`,
+            });
+        };
+
+        // ── String key: "colname" ─────────────────────────────────────────────
+        const strKey = /^["']([^"'\\]*)["']$/.exec(condArg);
+        if (strKey) {
+            const colName = strKey[1];
+            const p = pos(strKey.index + 1, colName.length);
+            const lf = leftSchema.find(f => f.name === colName);
+            const rf = rightSchema?.find(f => f.name === colName);
+            if (!lf) { issues.push(makeColumnIssue(colName, leftDfVar, leftSchema, p.line, p.col)); }
+            if (rightDfName && rightSchema && !rf) { issues.push(makeColumnIssue(colName, rightDfName, rightSchema, p.line, p.col)); }
+            if (lf && rf && rightDfName && lf.type !== 'unknown' && rf.type !== 'unknown') {
+                emitTypeMismatch(leftDfVar, colName, lf.type, rightDfName, colName, rf.type, strKey.index, strKey[0].length);
+            }
+            continue;
+        }
+
+        // ── List keys: ["col1", "col2"] ───────────────────────────────────────
+        const listKey = /^\[([^\]]*)\]$/.exec(condArg);
+        if (listKey) {
+            const krRe = /["']([^"'\\]*)["']/g;
+            let km: RegExpExecArray | null;
+            while ((km = krRe.exec(listKey[1])) !== null) {
+                const colName = km[1];
+                // km.index is relative to listKey[1]; adjust to condArg offset
+                const condOffset = listKey.index + 1 + km.index + 1; // +1 for '[', +1 past quote
+                const p = pos(condOffset, colName.length);
+                const lf = leftSchema.find(f => f.name === colName);
+                const rf = rightSchema?.find(f => f.name === colName);
+                if (!lf) { issues.push(makeColumnIssue(colName, leftDfVar, leftSchema, p.line, p.col)); }
+                if (rightDfName && rightSchema && !rf) { issues.push(makeColumnIssue(colName, rightDfName, rightSchema, p.line, p.col)); }
+                if (lf && rf && rightDfName && lf.type !== 'unknown' && rf.type !== 'unknown') {
+                    emitTypeMismatch(leftDfVar, colName, lf.type, rightDfName, colName, rf.type, condOffset - 1, km[0].length);
+                }
+            }
+            continue;
+        }
+
+        // ── Bracket equality: df["x"] == df2["y"] ────────────────────────────
+        // Existence is already covered by checkBracketAccess; only check types here.
+        const beRe = /\b(\w+)\s*\[\s*["']([^"'\\]*)["']\s*\]\s*==\s*(\w+)\s*\[\s*["']([^"'\\]*)["']\s*\]/g;
+        let beM: RegExpExecArray | null;
+        while ((beM = beRe.exec(condArg)) !== null) {
+            const lS = resolve(beM[1]); const rS = resolve(beM[3]);
+            const lf = lS?.find(f => f.name === beM![2]);
+            const rf = rS?.find(f => f.name === beM![4]);
+            if (lf && rf && lf.type !== 'unknown' && rf.type !== 'unknown') {
+                emitTypeMismatch(beM[1], beM[2], lf.type, beM[3], beM[4], rf.type, beM.index, beM[0].length);
+            }
+        }
+        if (/\w+\s*\[/.test(condArg)) { continue; }
+
+        // ── Attribute access: df.col == df2.col ──────────────────────────────
+        // checkBracketAccess/checkColFunction don't cover df.col syntax — check both
+        // existence (SCHEMA_COL_001) and type compatibility (SCHEMA_JOIN_001) here.
+        const aeRe = /\b(\w+)\.(\w+)(?!\s*\()\s*==\s*(\w+)\.(\w+)(?!\s*\()/g;
+        let aeM: RegExpExecArray | null;
+        while ((aeM = aeRe.exec(condArg)) !== null) {
+            if (NON_DF.has(aeM[1])) { continue; }
+            const lS = resolve(aeM[1]); const rS = resolve(aeM[3]);
+            const lf = lS?.find(f => f.name === aeM![2]);
+            const rf = rS?.find(f => f.name === aeM![4]);
+            const p = pos(aeM.index, aeM[0].length);
+            if (!lf && lS) { issues.push(makeColumnIssue(aeM[2], aeM[1], lS, p.line, p.col)); }
+            if (!rf && rS) { issues.push(makeColumnIssue(aeM[4], aeM[3], rS, p.line, p.col)); }
+            if (lf && rf && lf.type !== 'unknown' && rf.type !== 'unknown') {
+                emitTypeMismatch(aeM[1], aeM[2], lf.type, aeM[3], aeM[4], rf.type, aeM.index, aeM[0].length);
+            }
+        }
+        if (/\b\w+\.\w+(?!\s*\()\s*==/.test(condArg)) { continue; }
+
+        // ── F.col() equality: F.col("x") == F.col("y") ───────────────────────
+        // Also handles alias-qualified: F.col("a.x") == F.col("b.y")
+        // Unqualified existence is covered by checkColFunction; only check types here.
+        const fcRe = /(?:(?:F|functions)\.)?col\s*\(\s*["']([^"'\\]*)["']\s*\)\s*==\s*(?:(?:F|functions)\.)?col\s*\(\s*["']([^"'\\]*)["']\s*\)/g;
+        let fcM: RegExpExecArray | null;
+        while ((fcM = fcRe.exec(condArg)) !== null) {
+            const resolveRef = (ref: string) => {
+                const dot = ref.indexOf('.');
+                if (dot !== -1) {
+                    const alias = ref.substring(0, dot);
+                    const col   = ref.substring(dot + 1);
+                    return { name: alias, col, schema: aliasMap.get(alias) ?? null };
+                }
+                // Unqualified: attribute to whichever DF uniquely owns it
+                const inLeft  = leftSchema.some(f => f.name === ref);
+                const inRight = rightSchema?.some(f => f.name === ref) ?? false;
+                if (inLeft  && !inRight) { return { name: leftDfVar,   col: ref, schema: leftSchema  }; }
+                if (inRight && !inLeft && rightDfName) { return { name: rightDfName, col: ref, schema: rightSchema }; }
+                return null;
+            };
+            const lRes = resolveRef(fcM[1]);
+            const rRes = resolveRef(fcM[2]);
+            if (!lRes?.schema || !rRes?.schema) { continue; }
+            const lf = lRes.schema.find(f => f.name === lRes!.col);
+            const rf = rRes.schema.find(f => f.name === rRes!.col);
+            if (lf && rf && lf.type !== 'unknown' && rf.type !== 'unknown') {
+                emitTypeMismatch(lRes.name, lRes.col, lf.type, rRes.name, rRes.col, rf.type, fcM.index, fcM[0].length);
+            }
+        }
+    }
+}
+
+/**
+ * Collect column names added by .withColumn("name", ...) calls that appear in
+ * `line` strictly BEFORE position `beforeIdx`.
+ * Used to avoid false-positive SCHEMA_COL_001 errors when a column is created
+ * and then referenced later in the same chained expression.
+ */
+function columnsAddedBeforePos(line: string, beforeIdx: number): Set<string> {
+    const added = new Set<string>();
+    const wcRe = /\.withColumn\s*\(\s*["']([^"'\\]*)["']/g;
+    let m: RegExpExecArray | null;
+    while ((m = wcRe.exec(line)) !== null) {
+        if (m.index >= beforeIdx) { break; }
+        added.add(m[1]);
+    }
+    return added;
+}
+
 // ── Main export ───────────────────────────────────────────────────────────────
 
 /**
@@ -499,6 +774,9 @@ export function validateSchema(code: string): CodeIssue[] {
         checkBracketAccess(line, joinedIdx, history, issues, origIdx);
         checkTypedFunctions(line, joinedIdx, history, issues, origIdx, dfContext);
     }
+
+    // Full-code join pass: handles all equality forms and multi-line paren-continuation joins
+    checkAllJoins(code, history, issues);
 
     return issues;
 }
