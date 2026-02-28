@@ -5,6 +5,7 @@
 import * as vscode from 'vscode';
 import { CodeIssue, Severity, AnalysisResult, Issue } from '../models/types';
 import { SEVERITY_PRIORITY } from '../models/types';
+import { StaticCostEstimate } from '../analysis/staticCostEstimator';
 
 export type ProgressStepStatus = 'pending' | 'running' | 'done' | 'error';
 
@@ -14,7 +15,7 @@ export interface ProgressStep {
     detail?: string;
 }
 
-type TreeItem = ProgressGroupItem | ProgressStepItem | SeverityGroupItem | IssueItem;
+type TreeItem = ProgressGroupItem | ProgressStepItem | SeverityGroupItem | IssueItem | CostEstimateGroupItem | CostEstimateItem;
 
 export class IssuesTreeDataProvider implements vscode.TreeDataProvider<TreeItem> {
     private _onDidChangeTreeData = new vscode.EventEmitter<TreeItem | undefined>();
@@ -23,6 +24,7 @@ export class IssuesTreeDataProvider implements vscode.TreeDataProvider<TreeItem>
     private issues: CodeIssue[] = [];
     private clusterIssues: Issue[] = [];
     private progressSteps: ProgressStep[] = [];
+    private costEstimate: StaticCostEstimate | null = null;
 
     setProgress(steps: ProgressStep[]): void {
         this.progressSteps = [...steps];
@@ -31,6 +33,11 @@ export class IssuesTreeDataProvider implements vscode.TreeDataProvider<TreeItem>
 
     clearProgress(): void {
         this.progressSteps = [];
+        this._onDidChangeTreeData.fire(undefined);
+    }
+
+    updateCostEstimate(estimate: StaticCostEstimate | null): void {
+        this.costEstimate = estimate;
         this._onDidChangeTreeData.fire(undefined);
     }
 
@@ -52,11 +59,18 @@ export class IssuesTreeDataProvider implements vscode.TreeDataProvider<TreeItem>
     getChildren(element?: TreeItem): TreeItem[] {
         if (!element) {
             const items: TreeItem[] = [];
+            if (this.costEstimate !== null) {
+                items.push(new CostEstimateGroupItem(this.costEstimate));
+            }
             if (this.progressSteps.length > 0) {
                 items.push(new ProgressGroupItem(this.progressSteps));
             }
             items.push(...this.getSeverityGroups());
             return items;
+        }
+
+        if (element instanceof CostEstimateGroupItem) {
+            return element.children;
         }
 
         if (element instanceof ProgressGroupItem) {
@@ -84,6 +98,30 @@ export class IssuesTreeDataProvider implements vscode.TreeDataProvider<TreeItem>
         return Array.from(groups.entries())
             .sort(([a], [b]) => SEVERITY_PRIORITY[a] - SEVERITY_PRIORITY[b])
             .map(([severity, issues]) => new SeverityGroupItem(severity, issues));
+    }
+}
+
+class CostEstimateGroupItem extends vscode.TreeItem {
+    children: CostEstimateItem[];
+
+    constructor(estimate: StaticCostEstimate) {
+        super(
+            `Estimated cost: ${estimate.formattedCost}`,
+            vscode.TreeItemCollapsibleState.Collapsed,
+        );
+        this.iconPath = new vscode.ThemeIcon('circuit-board');
+        const { nodes, cores, memoryGB, ratePerHour } = estimate.computeSpec;
+        this.children = [
+            new CostEstimateItem(`Total data: ${estimate.totalDataGB.toFixed(1)} GB`),
+            new CostEstimateItem(`Cluster: ${nodes} nodes × ${cores} cores, ${memoryGB} GB/node`),
+            new CostEstimateItem(`Rate: $${ratePerHour.toFixed(2)}/hr`),
+        ];
+    }
+}
+
+class CostEstimateItem extends vscode.TreeItem {
+    constructor(label: string) {
+        super(label, vscode.TreeItemCollapsibleState.None);
     }
 }
 

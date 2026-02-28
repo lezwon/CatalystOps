@@ -6,6 +6,7 @@
 
 import * as vscode from 'vscode';
 import { analyzeCode } from './analysis/codeAnalyzer';
+import { estimateStaticCost } from './analysis/staticCostEstimator';
 import { createDiagnosticCollection, setCodeIssueDiagnostics, clearDiagnostics } from './providers/diagnosticsProvider';
 import { createStatusBar, setIdle, setAnalyzing, setResults, setError } from './views/statusBar';
 import { analyzeCost, showGeneratedScript, previewDryRunScript } from './commands/analyzeCost';
@@ -109,6 +110,9 @@ function runLocalAnalysis(document: vscode.TextDocument, issuesTreeProvider: Iss
     try {
         const code = document.getText();
         const issues = analyzeCode(code);
+
+        const costEstimate = estimateStaticCost(code);
+        issuesTreeProvider.updateCostEstimate(costEstimate);
 
         setCodeIssueDiagnostics(document.uri, issues);
         issuesTreeProvider.updateFromCodeIssues(issues);

@@ -3,6 +3,7 @@
  */
 
 import * as vscode from 'vscode';
+import { estimateStaticCost } from '../analysis/staticCostEstimator';
 
 /**
  * Create a CodeLens provider that shows safety warnings on high-risk PySpark operations.
@@ -11,7 +12,24 @@ export function createCodeLensProvider(): vscode.CodeLensProvider {
     return {
         provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
             const lenses: vscode.CodeLens[] = [];
-            const lines = document.getText().split('\n');
+            const text = document.getText();
+            const lines = text.split('\n');
+
+            // Static cost estimate from @compute/@size annotations
+            if (text.includes('@compute:')) {
+                const costEstimate = estimateStaticCost(text);
+                if (costEstimate) {
+                    const { annotationLine } = costEstimate.computeSpec;
+                    const line = lines[annotationLine] ?? '';
+                    const range = new vscode.Range(annotationLine, 0, annotationLine, line.length);
+                    const totalGB = costEstimate.totalDataGB.toFixed(1);
+                    const rate = costEstimate.computeSpec.ratePerHour.toFixed(2);
+                    lenses.push(new vscode.CodeLens(range, {
+                        title: `$(circuit-board) Estimated cost: ${costEstimate.formattedCost}  (${totalGB} GB @ $${rate}/hr)`,
+                        command: 'catalystops.analyzeCost',
+                    }));
+                }
+            }
 
             for (let i = 0; i < lines.length; i++) {
                 const line = lines[i];
