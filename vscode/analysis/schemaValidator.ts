@@ -102,6 +102,12 @@ function makeColumnIssue(
     };
 }
 
+const CATEGORY_TYPE_LIST: Record<string, string> = {
+    numeric:        'integer, long, double, float, or decimal',
+    string:         'string',
+    'date/timestamp': 'date or timestamp',
+};
+
 function makeTypeIssue(
     colName: string,
     funcName: string,
@@ -110,13 +116,14 @@ function makeTypeIssue(
     lineIdx: number,
     column: number,
 ): CodeIssue {
+    const expectedTypes = CATEGORY_TYPE_LIST[expectedCategory] ?? expectedCategory;
     return {
         id: 'SCHEMA_TYPE_001',
         severity: Severity.WARNING,
         category: IssueCategory.CODE,
-        title: `Type mismatch: "${funcName}" on ${actualType} column "${colName}"`,
-        description: `Function "${funcName}" requires a ${expectedCategory} column, but "${colName}" is of type ${actualType}.`,
-        fix: { description: `Ensure "${colName}" holds ${expectedCategory} values, or use an appropriate conversion function.` },
+        title: `Type mismatch: "${funcName}" expects ${expectedCategory} but "${colName}" is ${actualType}`,
+        description: `Function "${funcName}" requires a ${expectedCategory} column (${expectedTypes}), but "${colName}" is of type ${actualType}.`,
+        fix: { description: `Cast "${colName}" to a compatible type (${expectedTypes}), or use an appropriate conversion function.` },
         line: lineIdx,
         column,
         endLine: lineIdx,
@@ -161,6 +168,63 @@ function extractStringColArgs(argsText: string): string[] {
     return cols;
 }
 
+// ── Continuation-line helpers ─────────────────────────────────────────────────
+
+/**
+ * Build a mapping from original line index → joined line index.
+ */
+function buildOrigToJoined(lineMap: number[], rawLineCount: number): number[] {
+    const origToJoined: number[] = new Array(rawLineCount).fill(0);
+    for (let j = 0; j < lineMap.length; j++) {
+        const start = lineMap[j];
+        const end = j + 1 < lineMap.length ? lineMap[j + 1] : rawLineCount;
+        for (let o = start; o < end; o++) { origToJoined[o] = j; }
+    }
+    return origToJoined;
+}
+
+/**
+ * For a continuation line (starting with '.'), scan backward through rawLines
+ * to find the DataFrame context — the variable and its schema immediately
+ * before this continuation block began.
+ */
+function lookBackForDfContext(
+    rawLines: string[],
+    origIdx: number,
+    origToJoined: number[],
+    history: BindingHistory,
+): { dfVar: string; schema: ParsedSchema } | null {
+    for (let i = origIdx - 1; i >= Math.max(0, origIdx - 50); i--) {
+        const prevLine = rawLines[i];
+        const joinedIdx = origToJoined[i];
+
+        // Try simple identifier-before-dot approach first
+        const dfInfo = findDfSchemaForLine(prevLine, joinedIdx, history);
+        if (dfInfo) { return dfInfo; }
+
+        // Handle "var = [( ]sourceVar" patterns where sourceVar isn't followed by '.'
+        // e.g.  "df = df \"  or  "df2 = df"  or  "df = (df"
+        const rhsMatch = /^\s*(\w+)\s*=\s*\(?(\w+)/.exec(prevLine);
+        if (rhsMatch) {
+            const lhsVar = rhsMatch[1];
+            const sourceVar = rhsMatch[2];
+            if (!['F', 'functions', 'spark', 'sc', 'sqlContext', 'col', 'lit'].includes(sourceVar)) {
+                // Use schema of sourceVar from BEFORE this joined line
+                const sourceSchema = schemaAtLine(history, sourceVar, joinedIdx - 1);
+                if (sourceSchema !== null) { return { dfVar: sourceVar, schema: sourceSchema }; }
+                // Fallback: LHS variable schema at this joined line
+                const lhsSchema = schemaAtLine(history, lhsVar, joinedIdx);
+                if (lhsSchema !== null) { return { dfVar: lhsVar, schema: lhsSchema }; }
+            }
+        }
+
+        // Stop looking if this previous line is not itself a continuation
+        const trimmed = prevLine.trim();
+        if (!trimmed.endsWith('\\') && !trimmed.startsWith('.')) { break; }
+    }
+    return null;
+}
+
 // ── Line-level checkers ───────────────────────────────────────────────────────
 
 /**
@@ -173,8 +237,9 @@ function checkMethodColArgs(
     history: BindingHistory,
     issues: CodeIssue[],
     reportLine = lineIdx,
+    dfContext: { dfVar: string; schema: ParsedSchema } | null = null,
 ): void {
-    const dfInfo = findDfSchemaForLine(line, lineIdx, history);
+    const dfInfo = dfContext ?? findDfSchemaForLine(line, lineIdx, history);
     if (!dfInfo) { return; }
 
     methodRe.lastIndex = 0;
@@ -210,8 +275,9 @@ function checkFirstStringColArg(
     history: BindingHistory,
     issues: CodeIssue[],
     reportLine = lineIdx,
+    dfContext: { dfVar: string; schema: ParsedSchema } | null = null,
 ): void {
-    const dfInfo = findDfSchemaForLine(line, lineIdx, history);
+    const dfInfo = dfContext ?? findDfSchemaForLine(line, lineIdx, history);
     if (!dfInfo) { return; }
 
     methodRe.lastIndex = 0;
@@ -242,8 +308,9 @@ function checkColFunction(
     history: BindingHistory,
     issues: CodeIssue[],
     reportLine = lineIdx,
+    dfContext: { dfVar: string; schema: ParsedSchema } | null = null,
 ): void {
-    const dfInfo = findDfSchemaForLine(line, lineIdx, history);
+    const dfInfo = dfContext ?? findDfSchemaForLine(line, lineIdx, history);
     if (!dfInfo) { return; }
 
     const colFuncRe = /(?<!\w)col\s*\(\s*["']([^"'\\]*)["']\s*\)/g;
@@ -312,8 +379,9 @@ function checkTypedFunctions(
     history: BindingHistory,
     issues: CodeIssue[],
     reportLine = lineIdx,
+    dfContext: { dfVar: string; schema: ParsedSchema } | null = null,
 ): void {
-    const dfInfo = findDfSchemaForLine(line, lineIdx, history);
+    const dfInfo = dfContext ?? findDfSchemaForLine(line, lineIdx, history);
     if (!dfInfo) { return; }
 
     // Match: [F.]funcname( — then extract ALL column arguments (bare strings or col())
@@ -400,44 +468,36 @@ export function validateSchema(code: string): CodeIssue[] {
 
     const history = buildDfSchemaMap(code, structSchemas, ddlSchemas);
     const issues: CodeIssue[] = [];
-    const { joinedLines, lineMap } = joinContinuationLines(code.split('\n'));
+    const rawLines = code.split('\n');
+    const { lineMap } = joinContinuationLines(rawLines);
+    const origToJoined = buildOrigToJoined(lineMap, rawLines.length);
 
-    for (let lineIdx = 0; lineIdx < joinedLines.length; lineIdx++) {
-        const line = joinedLines[lineIdx];
-        const origLine = lineMap[lineIdx]; // original first-line index for issue reporting
+    for (let origIdx = 0; origIdx < rawLines.length; origIdx++) {
+        const line = rawLines[origIdx];
+        const joinedIdx = origToJoined[origIdx];
 
         // Skip comment lines and lines suppressed with # noqa: catalystops
         if (line.trim().startsWith('#')) { continue; }
         if (/# noqa: catalystops\b/i.test(line)) { continue; }
 
+        // For continuation lines (starting with '.'), look backward for the DataFrame context
+        // so each physical line gets its own correct squiggly position.
+        let dfContext: { dfVar: string; schema: ParsedSchema } | null = null;
+        if (line.trim().startsWith('.')) {
+            dfContext = lookBackForDfContext(rawLines, origIdx, origToJoined, history);
+        }
+
         // ── Column name checks ────────────────────────────────────────────────
 
-        // .select("col1", "col2", ...)
-        checkMethodColArgs(line, lineIdx, /\.select\s*\(/, history, issues, origLine);
-
-        // .groupBy("col", ...)
-        checkMethodColArgs(line, lineIdx, /\.groupBy\s*\(/, history, issues, origLine);
-
-        // .orderBy("col", ...) / .sort("col", ...)
-        checkMethodColArgs(line, lineIdx, /\.(?:orderBy|sort)\s*\(/, history, issues, origLine);
-
-        // .partitionBy("col", ...)
-        checkMethodColArgs(line, lineIdx, /\.partitionBy\s*\(/, history, issues, origLine);
-
-        // .drop("col") — first arg only
-        checkFirstStringColArg(line, lineIdx, /\.drop\s*\(/, history, issues, origLine);
-
-        // .withColumnRenamed("old", "new") — first arg (old name)
-        checkFirstStringColArg(line, lineIdx, /\.withColumnRenamed\s*\(/, history, issues, origLine);
-
-        // col("colname")
-        checkColFunction(line, lineIdx, history, issues, origLine);
-
-        // df["colname"]
-        checkBracketAccess(line, lineIdx, history, issues, origLine);
-
-        // ── Type checks ───────────────────────────────────────────────────────
-        checkTypedFunctions(line, lineIdx, history, issues, origLine);
+        checkMethodColArgs(line, joinedIdx, /\.select\s*\(/, history, issues, origIdx, dfContext);
+        checkMethodColArgs(line, joinedIdx, /\.groupBy\s*\(/, history, issues, origIdx, dfContext);
+        checkMethodColArgs(line, joinedIdx, /\.(?:orderBy|sort)\s*\(/, history, issues, origIdx, dfContext);
+        checkMethodColArgs(line, joinedIdx, /\.partitionBy\s*\(/, history, issues, origIdx, dfContext);
+        checkFirstStringColArg(line, joinedIdx, /\.drop\s*\(/, history, issues, origIdx, dfContext);
+        checkFirstStringColArg(line, joinedIdx, /\.withColumnRenamed\s*\(/, history, issues, origIdx, dfContext);
+        checkColFunction(line, joinedIdx, history, issues, origIdx, dfContext);
+        checkBracketAccess(line, joinedIdx, history, issues, origIdx);
+        checkTypedFunctions(line, joinedIdx, history, issues, origIdx, dfContext);
     }
 
     return issues;

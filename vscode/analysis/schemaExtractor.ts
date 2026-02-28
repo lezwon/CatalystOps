@@ -12,8 +12,32 @@ export type FieldType =
 export interface SchemaField { name: string; type: FieldType; }
 export type ParsedSchema = SchemaField[];
 
-/** Maps a schema-variable name to its parsed fields. */
-export type SchemaMap = Map<string, ParsedSchema>;
+/** One definition of a schema variable, tied to the source line it appears on. */
+export interface SchemaVersion {
+    schema: ParsedSchema;
+    /** 0-based original-source line on which `varName = ...` appears. */
+    line: number;
+}
+
+/**
+ * Maps a schema-variable name to ALL of its definition sites, ordered by line.
+ * Multiple entries arise when the same variable name is reused for different schemas.
+ */
+export type SchemaMap = Map<string, SchemaVersion[]>;
+
+/**
+ * Return the schema for `varName` that was most recently defined at or before `lineIdx`.
+ * Returns null if the variable is unknown or not yet defined at that line.
+ */
+export function schemaVarAtLine(map: SchemaMap, varName: string, lineIdx: number): ParsedSchema | null {
+    const versions = map.get(varName);
+    if (!versions || versions.length === 0) { return null; }
+    let result: SchemaVersion | undefined;
+    for (const v of versions) {
+        if (v.line <= lineIdx) { result = v; }
+    }
+    return result ? result.schema : null;
+}
 
 // ── Parenthesis matching ──────────────────────────────────────────────────────
 
@@ -51,6 +75,12 @@ export function findMatchingParen(code: string, openPos: number): number {
                 if (code[i] === q) { i++; break; }
                 i++;
             }
+            continue;
+        }
+
+        // Python line comments: skip everything until the next newline
+        if (ch === '#') {
+            while (i < code.length && code[i] !== '\n') { i++; }
             continue;
         }
 
@@ -110,19 +140,20 @@ export function parseStructType(text: string): ParsedSchema {
  */
 export function extractStructTypeSchemas(code: string): SchemaMap {
     const schemaMap: SchemaMap = new Map();
-    // Match: varname = StructType(
     const assignRe = /(\w+)\s*=\s*StructType\s*\(/g;
     let m: RegExpExecArray | null;
     while ((m = assignRe.exec(code)) !== null) {
         const varName = m[1];
-        // The '(' is the last character of the match
+        const line = code.substring(0, m.index).split('\n').length - 1;
         const openPos = m.index + m[0].length - 1;
         const closePos = findMatchingParen(code, openPos);
         if (closePos === -1) { continue; }
         const content = code.substring(openPos + 1, closePos);
         const fields = parseStructType(content);
         if (fields.length > 0) {
-            schemaMap.set(varName, fields);
+            const versions = schemaMap.get(varName) ?? [];
+            versions.push({ schema: fields, line });
+            schemaMap.set(varName, versions);
         }
     }
     return schemaMap;
@@ -180,15 +211,14 @@ const DDL_TYPE_RE = /\b(INT|INTEGER|BIGINT|STRING|DOUBLE|FLOAT|BOOLEAN|TIMESTAMP
  */
 export function extractDdlSchemas(code: string): SchemaMap {
     const schemaMap: SchemaMap = new Map();
-    // Match: varname = " or varname = '
     const assignRe = /(\w+)\s*=\s*(["'])/g;
     let m: RegExpExecArray | null;
     while ((m = assignRe.exec(code)) !== null) {
         const varName = m[1];
         const quoteChar = m[2];
+        const line = code.substring(0, m.index).split('\n').length - 1;
         const strStart = m.index + m[0].length;
         let strEnd = strStart;
-        // Find end of string, respecting escape sequences
         while (strEnd < code.length) {
             if (code[strEnd] === '\\') { strEnd += 2; continue; }
             if (code[strEnd] === quoteChar) { break; }
@@ -198,7 +228,9 @@ export function extractDdlSchemas(code: string): SchemaMap {
         if (!DDL_TYPE_RE.test(content)) { continue; }
         const fields = parseDdlSchema(content);
         if (fields.length > 0) {
-            schemaMap.set(varName, fields);
+            const versions = schemaMap.get(varName) ?? [];
+            versions.push({ schema: fields, line });
+            schemaMap.set(varName, versions);
         }
     }
     return schemaMap;

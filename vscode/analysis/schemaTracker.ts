@@ -7,10 +7,12 @@ import {
     ParsedSchema,
     SchemaField,
     SchemaMap,
+    SchemaVersion,
     FieldType,
     parseDdlSchema,
     findMatchingParen,
     joinContinuationLines,
+    schemaVarAtLine,
 } from './schemaExtractor';
 import functionTypesJson from './functionTypes.json';
 
@@ -159,9 +161,13 @@ export function buildDfSchemaMap(
     ddlSchemas: SchemaMap,
 ): BindingHistory {
     const history: BindingHistory = new Map();
-    // Combined lookup: variable-name → ParsedSchema
-    const allSchemas = new Map<string, ParsedSchema>([...structSchemas, ...ddlSchemas]);
-    const { joinedLines: lines } = joinContinuationLines(code.split('\n'));
+    // Merge both schema maps into one, preserving all definition sites
+    const allSchemas: SchemaMap = new Map(structSchemas);
+    for (const [key, versions] of ddlSchemas) {
+        const existing = allSchemas.get(key) ?? [];
+        allSchemas.set(key, [...existing, ...versions].sort((a, b) => a.line - b.line));
+    }
+    const { joinedLines: lines, lineMap } = joinContinuationLines(code.split('\n'));
 
     for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
         const line = lines[lineIdx];
@@ -196,7 +202,7 @@ export function buildDfSchemaMap(
                     let schema: ParsedSchema | null = null;
                     const varRefMatch = /^(\w+)$/.exec(trimmedContent);
                     if (varRefMatch) {
-                        schema = allSchemas.get(varRefMatch[1]) ?? null;
+                        schema = schemaVarAtLine(allSchemas, varRefMatch[1], lineMap[lineIdx]);
                     } else {
                         const strMatch = /^["']([^"']+)["']$/.exec(trimmedContent);
                         if (strMatch) {
@@ -238,7 +244,7 @@ export function buildDfSchemaMap(
                     // Variable reference?
                     const varRefMatch = /^(\w+)\s*$/.exec(schemaArg);
                     if (varRefMatch) {
-                        schema = allSchemas.get(varRefMatch[1]) ?? null;
+                        schema = schemaVarAtLine(allSchemas, varRefMatch[1], lineMap[lineIdx]);
                     } else {
                         // Inline DDL string?
                         const strMatch = /^["']([^"']+)["']$/.exec(schemaArg);

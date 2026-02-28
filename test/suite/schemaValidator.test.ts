@@ -21,7 +21,7 @@ suite('Schema Extraction — StructType', () => {
     test('single-line StructType extracts all fields', () => {
         const code = `schema = StructType([StructField("id", IntegerType()), StructField("name", StringType())])`;
         const map = extractStructTypeSchemas(code);
-        const fields = map.get('schema');
+        const fields = map.get('schema')?.[0]?.schema;
         assert.ok(fields, 'schema variable should be extracted');
         assert.strictEqual(fields!.length, 2);
         assert.deepStrictEqual(fields![0], { name: 'id', type: 'integer' });
@@ -37,7 +37,7 @@ schema = StructType([
 ])
 `.trim();
         const map = extractStructTypeSchemas(code);
-        const fields = map.get('schema');
+        const fields = map.get('schema')?.[0]?.schema;
         assert.ok(fields, 'should parse multi-line StructType');
         assert.strictEqual(fields!.length, 3);
         assert.deepStrictEqual(fields![0], { name: 'user_id', type: 'long' });
@@ -51,14 +51,14 @@ s1 = StructType([StructField("a", StringType())])
 s2 = StructType([StructField("b", IntegerType()), StructField("c", FloatType())])
 `.trim();
         const map = extractStructTypeSchemas(code);
-        assert.strictEqual(map.get('s1')!.length, 1);
-        assert.strictEqual(map.get('s2')!.length, 2);
+        assert.strictEqual(map.get('s1')![0].schema.length, 1);
+        assert.strictEqual(map.get('s2')![0].schema.length, 2);
     });
 
     test('StructType with fields= keyword argument is parsed', () => {
         const code = `my_schema = StructType(fields=[StructField("ts", TimestampType()), StructField("val", DoubleType())])`;
         const map = extractStructTypeSchemas(code);
-        const fields = map.get('my_schema');
+        const fields = map.get('my_schema')?.[0]?.schema;
         assert.ok(fields, 'should extract named-fields syntax');
         assert.strictEqual(fields!.length, 2);
         assert.strictEqual(fields![0].type, 'timestamp');
@@ -496,6 +496,52 @@ df.select("id", "bad_col")
         const issues = validateSchema(code);
         assert.ok(issues.some(i => i.id === 'SCHEMA_COL_001' && i.description.includes('bad_col')),
             'unknown column in select should be flagged');
+    });
+
+    test('schema variable redefined later does not pollute earlier DataFrame', () => {
+        const code = `
+schema = StructType([StructField("a1", StringType()), StructField("a2", IntegerType())])
+df1 = spark.read.schema(schema).json(path)
+df1.select(col("a1"))
+
+schema = StructType([StructField("name", StringType()), StructField("age", IntegerType())])
+df2 = spark.read.schema(schema).json(path)
+df2.select(col("name"))
+`.trim();
+        const issues = validateSchema(code);
+        assert.strictEqual(issues.filter(i => i.id === 'SCHEMA_COL_001').length, 0,
+            'valid columns for both DataFrames should not be flagged when schema is redefined');
+    });
+
+    test('schema variable redefined — second DataFrame gets second schema', () => {
+        const code = `
+schema = StructType([StructField("a1", StringType())])
+df1 = spark.read.schema(schema).json(path)
+
+schema = StructType([StructField("name", StringType())])
+df2 = spark.read.schema(schema).json(path)
+df2.select(col("a1"))
+`.trim();
+        const issues = validateSchema(code);
+        assert.ok(issues.some(i => i.id === 'SCHEMA_COL_001' && i.description.includes('"a1"')),
+            'column from first schema should be flagged on second DataFrame');
+    });
+
+    test('backslash continuation lines each get their own squiggly on the correct line', () => {
+        const code = [
+            'schema = StructType([StructField("a1", StringType()), StructField("a2", IntegerType())])',
+            'df = spark.createDataFrame(data, schema)',
+            'df = df \\',
+            '    .withColumn("x", col("typo1")) \\',
+            '    .withColumn("y", col("typo2"))',
+        ].join('\n');
+        const issues = validateSchema(code);
+        const col1 = issues.find(i => i.id === 'SCHEMA_COL_001' && i.description.includes('typo1'));
+        const col2 = issues.find(i => i.id === 'SCHEMA_COL_001' && i.description.includes('typo2'));
+        assert.ok(col1, 'typo1 should be flagged');
+        assert.ok(col2, 'typo2 should be flagged');
+        assert.strictEqual(col1!.line, 3, 'typo1 should be on line index 3 (4th line)');
+        assert.strictEqual(col2!.line, 4, 'typo2 should be on line index 4 (5th line)');
     });
 
     test('levenshtein distance is computed correctly', () => {
