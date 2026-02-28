@@ -1,4 +1,8 @@
-# CatalystOps — PySpark Optimizer
+<div align="center">
+  <img src="https://raw.githubusercontent.com/lezwon/CatalystOps/refs/heads/main/media/icon.svg" alt="CatalystOps Logo" width="200" height="250" />
+</div>
+
+<h1 align="center">CatalystOps — PySpark Optimizer</h1>
 
 **CatalystOps** catches PySpark performance issues before they hit production. It detects **30+ anti-patterns** locally in real time, validates **column names, types, and schema alignment** at edit time, estimates **notebook compute costs** from source annotations, and runs **safe dry-run analysis** on a Databricks cluster or serverless compute to inspect Catalyst execution plans — all without executing Spark jobs or touching your data. Plan parsing is fully **Photon-aware** and detects cross-DataFrame repeated scans across your entire script.
 
