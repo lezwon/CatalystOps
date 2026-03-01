@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/lezwon/CatalystOps/refs/heads/main/media/icon.svg" alt="CatalystOps Logo" width="200" height="250" />
+  <img src="https://raw.githubusercontent.com/lezwon/CatalystOps/refs/heads/main/media/icon.png" alt="CatalystOps Logo"/>
 </div>
 
 <h1 align="center">CatalystOps — PySpark Optimizer</h1>
