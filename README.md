@@ -4,7 +4,7 @@
 
 <h1 align="center">CatalystOps — PySpark Optimizer</h1>
 
-**CatalystOps** catches PySpark performance issues before they hit production. It detects **35+ anti-patterns** locally in real time, validates **column names, types, and schema alignment** at edit time, estimates **notebook compute costs** from source annotations, and runs **safe dry-run analysis** on a Databricks cluster or serverless compute to inspect Catalyst execution plans — all without executing Spark jobs or touching your data. Plan parsing is fully **Photon-aware** and detects cross-DataFrame repeated scans across your entire script.
+**CatalystOps** catches PySpark performance issues before they hit production. It detects **35+ anti-patterns** locally in real time, validates **column names, types, and schema alignment** at edit time, estimates **notebook compute costs** from source annotations, runs **safe dry-run analysis** on a Databricks cluster or serverless compute to inspect Catalyst execution plans, and tracks **actual Databricks spending** in a built-in billing dashboard — all without executing Spark jobs or touching your data. Plan parsing is fully **Photon-aware** and detects cross-DataFrame repeated scans across your entire script.
 
 > **Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=CatalystOps.catalystops)**
 
@@ -162,6 +162,44 @@ The 500 MB/s throughput is a conservative Delta/Parquet scan assumption. The `ov
 
 ---
 
+### Billing Dashboard (Requires Databricks Unity Catalog System Tables)
+
+Track actual Databricks spending without leaving VS Code. The billing dashboard queries `system.billing.usage` via the Databricks SQL Statement Execution API and visualises cost broken down by user, job, and workload type.
+
+**Sidebar tree view** — always visible in the CatalystOps panel:
+
+```
+$(graph) Last 7 days: $84.20  (312.5 DBUs)
+├── By User
+│   ├── alice@company.com          $52.10
+│   └── bob@company.com            $32.10
+├── By Job
+│   ├── pipeline_etl (123)         $41.00
+│   └── daily_agg (456)            $43.20
+└── By Workload
+    ├── JOBS                        $71.50
+    └── SQL                         $12.70
+```
+
+**Webview dashboard** — opens beside your editor with:
+
+- **Period tabs**: Day (last 24 hrs) · Week (last 7 days) · Month (last 30 days) · Custom date range
+- **Metric cards**: Total cost · DBUs · unique users · unique jobs
+- **CSS bar charts**: Top 10 users, top 10 jobs, workload breakdown
+- **Daily trend chart**: Bar chart of per-day spend over the selected window
+- **↻ Refresh** button to force a live re-query; tab switches use the 1-hour cache
+
+**How it works:**
+
+1. Auto-discovers a SQL warehouse (prefers running serverless; override via `catalystops.billing.warehouseId`)
+2. Submits a SQL query to `system.billing.usage` joined with `system.billing.list_prices` for list-price dollars
+3. Results are cached locally for 1 hour; Refresh bypasses the cache
+4. If a fetch fails, the dashboard restores the last successful result
+
+> **Requirement**: Unity Catalog System Tables must be enabled on your workspace (`system.billing.usage`).
+
+---
+
 ### Cluster Analysis — Catalyst Plan Inspection (Databricks Dry Run)
 
 When a Databricks connection is configured, CatalystOps submits a neutralized version of your script to the cluster or serverless compute and parses both the **physical** and **analyzed logical** execution plans.
@@ -306,6 +344,8 @@ Leave **Cluster ID blank** in the configuration wizard — CatalystOps automatic
 | **CatalystOps: Configure Databricks Connection** | — | Interactive connection setup wizard |
 | **CatalystOps: Show Generated Script** | — | View the full neutralized script sent to the cluster |
 | **CatalystOps: Preview Dry-Run Script** | — | Preview only the neutralized user code (before submission) |
+| **CatalystOps: Show Billing Dashboard** | — | Open the billing dashboard (defaults to last 7 days) |
+| **CatalystOps: Refresh Billing Data** | — | Force a fresh billing query, bypassing the cache |
 
 ### Typical Workflow
 
@@ -334,6 +374,7 @@ Leave **Cluster ID blank** in the configuration wizard — CatalystOps automatic
 | `catalystops.cost.dbuRatePerHour` | `0.4` | DBU rate ($/hr) for interactive cluster cost estimation |
 | `catalystops.cost.serverlessRatePerHour` | `0.7` | Effective hourly cost ($/hr) for serverless runs, used with data-volume-based estimation. Rough guide: DBU rate × expected DBUs/hour for your workload |
 | `catalystops.cost.queryBillingUsage` | `false` | After each serverless dry run, submit a background job that queries `system.billing.usage` to fetch actual DBU consumption and show the real cost. Requires Unity Catalog System Tables |
+| `catalystops.billing.warehouseId` | `""` | SQL warehouse ID to use for billing queries. Leave blank to auto-discover (prefers running serverless warehouse) |
 | `catalystops.debug` | `false` | Log equivalent curl commands and diagnostic details to the Output panel |
 
 ---
@@ -480,11 +521,16 @@ catalyst-ops/
 │   │   ├── client.ts             # Authenticated HTTP client for Databricks REST APIs
 │   │   ├── clusterExecution.ts   # Interactive cluster command submission and polling
 │   │   └── serverlessExecution.ts # Serverless job submission, polling, billing query
+│   ├── billing/
+│   │   ├── billingTypes.ts       # BillingRow / BillingSummary types, date-range helpers, computeSummary
+│   │   ├── billingFetcher.ts     # SQL Statement Execution API, warehouse discovery, result parsing
+│   │   └── billingCache.ts       # Local file cache (1-hour TTL) keyed by date range
 │   ├── commands/
 │   │   ├── analyzeCost.ts        # Full analysis orchestration
 │   │   ├── analyzeSelection.ts   # Selection-scoped analysis
 │   │   ├── showReport.ts         # HTML report generation
-│   │   └── configureConnection.ts
+│   │   ├── configureConnection.ts
+│   │   └── showBillingDashboard.ts # Billing orchestrator: cache → fetch → tree + webview
 │   ├── providers/
 │   │   ├── diagnosticsProvider.ts
 │   │   ├── codeLensProvider.ts
@@ -492,14 +538,17 @@ catalyst-ops/
 │   │   └── codeActionProvider.ts
 │   └── views/
 │       ├── statusBar.ts
-│       └── issuesTreeView.ts     # Sidebar tree with progress, cost, and write summaries
+│       ├── issuesTreeView.ts     # Sidebar tree with progress, cost, and write summaries
+│       ├── billingTreeView.ts    # Billing sidebar tree (by user / job / workload)
+│       └── billingWebview.ts     # Full billing dashboard (tabs, bar charts, daily trend)
 ├── test/
 │   └── suite/
 │       ├── codeAnalyzer.test.ts
 │       ├── planParser.test.ts
 │       ├── safetyWrapper.test.ts
 │       ├── schemaValidator.test.ts
-│       └── staticCostEstimator.test.ts
+│       ├── staticCostEstimator.test.ts
+│       └── billingTypes.test.ts  # dateRangeForPeriod, periodFromRange, computeSummary
 └── media/
     └── icon.svg
 ```

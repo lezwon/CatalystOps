@@ -21,6 +21,8 @@ import { createCodeLensProvider } from './providers/codeLensProvider';
 import { createHoverProvider, createWriteSchemaHoverProvider } from './providers/hoverProvider';
 import { createCodeActionProvider } from './providers/codeActionProvider';
 import { IssuesTreeDataProvider } from './views/issuesTreeView';
+import { BillingTreeDataProvider } from './views/billingTreeView';
+import { showBillingDashboard } from './commands/showBillingDashboard';
 import { Severity } from './models/types';
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -36,6 +38,10 @@ export function activate(context: vscode.ExtensionContext): void {
         const issuesTreeProvider = new IssuesTreeDataProvider();
         vscode.window.registerTreeDataProvider('catalystops.issuesTree', issuesTreeProvider);
 
+        // Billing tree view
+        const billingTreeProvider = new BillingTreeDataProvider();
+        vscode.window.registerTreeDataProvider('catalystops.billingTree', billingTreeProvider);
+
         // Register commands
         context.subscriptions.push(
             diagnostics,
@@ -46,6 +52,10 @@ export function activate(context: vscode.ExtensionContext): void {
             vscode.commands.registerCommand('catalystops.configureConnection', () => configureConnection()),
             vscode.commands.registerCommand('catalystops.showGeneratedScript', () => showGeneratedScript()),
             vscode.commands.registerCommand('catalystops.previewDryRunScript', () => previewDryRunScript()),
+            vscode.commands.registerCommand('catalystops.showBillingDashboard',
+                () => showBillingDashboard(context, billingTreeProvider)),
+            vscode.commands.registerCommand('catalystops.refreshBilling',
+                () => showBillingDashboard(context, billingTreeProvider, undefined, undefined, true)),
         );
 
         // Register providers for Python files

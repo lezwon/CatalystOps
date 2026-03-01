@@ -2,7 +2,7 @@
   "name": "catalystops",
   "displayName": "CatalystOps - PySpark Optimizer",
   "description": "Analyze PySpark code for performance issues using Catalyst execution plan analysis",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "CatalystOps",
   "repository": {
     "type": "git",
@@ -26,7 +26,8 @@
   ],
   "activationEvents": [
     "onLanguage:python",
-    "onView:catalystops.issuesTree"
+    "onView:catalystops.issuesTree",
+    "onView:catalystops.billingTree"
   ],
   "main": "./out/vscode/extension.js",
   "contributes": {
@@ -54,6 +55,16 @@
       {
         "command": "catalystops.previewDryRunScript",
         "title": "CatalystOps: Preview Dry-Run Script"
+      },
+      {
+        "command": "catalystops.showBillingDashboard",
+        "title": "CatalystOps: Show Billing Dashboard",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "catalystops.refreshBilling",
+        "title": "CatalystOps: Refresh Billing Data",
+        "icon": "$(refresh)"
       }
     ],
     "keybindings": [
@@ -128,6 +139,11 @@
           "default": "cluster",
           "description": "Execution mode for dry-run analysis. 'cluster' uses an interactive cluster (requires clusterId). 'serverless' uses Databricks Serverless Compute (requires Premium tier, no clusterId needed)."
         },
+        "catalystops.billing.warehouseId": {
+          "type": "string",
+          "default": "",
+          "description": "SQL warehouse ID to use for billing queries. If empty, CatalystOps auto-selects the first available warehouse."
+        },
         "catalystops.debug": {
           "type": "boolean",
           "default": false,
@@ -150,6 +166,25 @@
           "id": "catalystops.issuesTree",
           "name": "Issues",
           "icon": "media/icon-mono.svg"
+        },
+        {
+          "id": "catalystops.billingTree",
+          "name": "Billing",
+          "icon": "media/icon-mono.svg"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "catalystops.showBillingDashboard",
+          "when": "view == catalystops.billingTree",
+          "group": "navigation"
+        },
+        {
+          "command": "catalystops.refreshBilling",
+          "when": "view == catalystops.billingTree",
+          "group": "navigation"
         }
       ]
     }
