@@ -251,15 +251,17 @@ spark.sql(f"SELECT * FROM {table}")
         assert.ok(!issues.some(i => i.id === 'CODE_DYN_PART_001'), 'overwrite without partitionBy needs no dynamic config');
     });
 
-    // ── Repeated source scan ───────────────────────────────────────────────────
+    // ── Repeated source scan (opt-in via enableRepeatedScanDetection) ─────────
+    // All tests in this section pass { enableRepeatedScanDetection: true } to opt in.
+    // A separate test at the end verifies the feature is silent when disabled.
 
-    test('CODE_REPRO_001: flags DataFrame used 2× without caching', () => {
+    test('CODE_REPRO_001: flags two direct actions on source DF without caching', () => {
         const code = [
             'big_df = spark.read.parquet("s3://bucket/data")',
-            'count = big_df.count()',
-            'result = big_df.filter(col("x") > 1)',
+            'big_df.count()',
+            'big_df.show()',
         ].join('\n');
-        const issues = analyzeCode(code);
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
         assert.ok(issues.some(i => i.id === 'CODE_REPRO_001'), 'should flag repeated source scan');
         assert.strictEqual(issues.find(i => i.id === 'CODE_REPRO_001')!.severity, 'warning');
     });
@@ -268,40 +270,40 @@ spark.sql(f"SELECT * FROM {table}")
         const code = [
             'big_df = spark.read.parquet("s3://bucket/data")',
             'big_df.cache()',
-            'count = big_df.count()',
-            'result = big_df.filter(col("x") > 1)',
+            'big_df.count()',
+            'big_df.show()',
         ].join('\n');
-        const issues = analyzeCode(code);
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
         assert.ok(!issues.some(i => i.id === 'CODE_REPRO_001'), 'cached before second use — should not flag');
     });
 
     test('CODE_REPRO_001: does not flag single-use DataFrame', () => {
         const code = [
             'df = spark.read.parquet("path")',
-            'result = df.filter(col("x") > 1)',
+            'df.write.parquet("out")',
         ].join('\n');
-        const issues = analyzeCode(code);
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
         assert.ok(!issues.some(i => i.id === 'CODE_REPRO_001'), 'single use — no repeated scan');
     });
 
-    test('CODE_REPRO_001: does not flag lazy transformation chains (same var reassignment)', () => {
+    test('CODE_REPRO_001: does not flag lazy self-reassignment chains', () => {
         const code = [
             'df = spark.read.parquet("path")',
             'df = df.filter(col("x") > 0)',
             'df = df.select("x", "y")',
             'df.write.parquet("out")',
         ].join('\n');
-        const issues = analyzeCode(code);
-        assert.ok(!issues.some(i => i.id === 'CODE_REPRO_001'), 'lazy transformation chain — should not flag');
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
+        assert.ok(!issues.some(i => i.id === 'CODE_REPRO_001'), 'lazy self-reassignment chain — should not flag');
     });
 
-    test('CODE_REPRO_001: flags spark.table() used multiple times', () => {
+    test('CODE_REPRO_001: flags spark.table() with two direct actions', () => {
         const code = [
             'orders = spark.table("catalog.orders")',
-            'count = orders.count()',
-            'top = orders.limit(10)',
+            'orders.count()',
+            'orders.show()',
         ].join('\n');
-        const issues = analyzeCode(code);
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
         assert.ok(issues.some(i => i.id === 'CODE_REPRO_001'), 'spark.table used twice — should flag');
     });
 
@@ -309,10 +311,128 @@ spark.sql(f"SELECT * FROM {table}")
         const code = [
             'df = spark.read.csv("data.csv")',
             'df.persist()',
-            'c1 = df.count()',
-            'c2 = df.filter(col("x") > 0).count()',
+            'df.count()',
+            'df.filter(col("x") > 0).count()',
         ].join('\n');
-        const issues = analyzeCode(code);
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
         assert.ok(!issues.some(i => i.id === 'CODE_REPRO_001'), 'persist() before second use — should not flag');
+    });
+
+    // ── Alias and derived lineage ──────────────────────────────────────────────
+
+    test('CODE_REPRO_001: flags alias used twice without caching source', () => {
+        const code = [
+            'df = spark.read.parquet("path")',
+            'df2 = df',           // pure alias
+            'df2.count()',        // scan #1 via alias
+            'df2.show()',         // scan #2 via alias → FLAG df
+        ].join('\n');
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
+        assert.ok(issues.some(i => i.id === 'CODE_REPRO_001'), 'alias used twice should flag the source');
+    });
+
+    test('CODE_REPRO_001: cache on alias prevents flag', () => {
+        const code = [
+            'df = spark.read.parquet("path")',
+            'df2 = df',
+            'df2.cache()',
+            'df2.count()',
+            'df2.show()',
+        ].join('\n');
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
+        assert.ok(!issues.some(i => i.id === 'CODE_REPRO_001'), 'cache on alias should prevent flag');
+    });
+
+    test('CODE_REPRO_001: flags derived DataFrame with two actions on it', () => {
+        const code = [
+            'df = spark.read.parquet("path")',
+            'filtered = df.filter(col("x") > 0)',  // lazy derived — no scan yet
+            'filtered.count()',                      // scan #1
+            'filtered.show()',                       // scan #2 → FLAG df
+        ].join('\n');
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
+        assert.ok(issues.some(i => i.id === 'CODE_REPRO_001'), 'two actions on derived DF should flag source');
+    });
+
+    test('CODE_REPRO_001: lazy derived assignment alone does not count as a scan', () => {
+        const code = [
+            'df = spark.read.parquet("path")',
+            'filtered = df.filter(col("x") > 0)',  // lazy — not a scan
+            'filtered.count()',                      // only one scan total
+        ].join('\n');
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
+        assert.ok(!issues.some(i => i.id === 'CODE_REPRO_001'), 'single action via derived DF — should not flag');
+    });
+
+    test('CODE_REPRO_001: transitive chain — grandchild actions flag the root source', () => {
+        const code = [
+            'df = spark.read.parquet("path")',
+            'df2 = df.filter(col("x") > 0)',   // derived from df
+            'df3 = df2.select("x")',            // derived from df2 → from df
+            'df3.count()',                       // scan #1
+            'df3.show()',                        // scan #2 → FLAG df
+        ].join('\n');
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
+        assert.ok(issues.some(i => i.id === 'CODE_REPRO_001'), 'transitive derived chain should flag source');
+    });
+
+    test('CODE_REPRO_001: mix of direct action and derived action counts together', () => {
+        const code = [
+            'df = spark.read.parquet("path")',
+            'df.count()',                       // scan #1 (direct)
+            'df2 = df.filter(col("x") > 0)',   // lazy derived
+            'df2.show()',                        // scan #2 (via derived) → FLAG
+        ].join('\n');
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
+        assert.ok(issues.some(i => i.id === 'CODE_REPRO_001'), 'direct + derived actions together should flag');
+    });
+
+    test('CODE_REPRO_001: action-in-chain (df2 = df.filter().count()) counts as scan not lazy', () => {
+        const code = [
+            'df = spark.read.parquet("path")',
+            'n = df.filter(col("x") > 0).count()',  // action in chain → scan #1, n not tracked
+            'df.show()',                              // scan #2 → FLAG
+        ].join('\n');
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
+        assert.ok(issues.some(i => i.id === 'CODE_REPRO_001'), 'action in chain should count as scan not lazy derive');
+    });
+
+    test('CODE_REPRO_001: tracked var as join argument is lazy, not a scan', () => {
+        // b = other_df.join(a, ...) is lazy — a appears as argument, not chain base
+        const code = [
+            'a = spark.read.parquet("path")',
+            'a = a.dropna()',
+            'b = merged_df.join(a, on=["id"], how="inner")',  // lazy — NOT a scan of a
+            'b.count()',                                        // scan #1
+            'b.show()',                                         // scan #2 → FLAG a
+        ].join('\n');
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
+        assert.ok(issues.some(i => i.id === 'CODE_REPRO_001'), 'join argument var should be tracked — actions on result count as scans');
+        // Scan count should be 2 (count + show), NOT 3 (join line wrongly counted)
+        assert.strictEqual(issues.find(i => i.id === 'CODE_REPRO_001')!.title, '"a" scanned 2× — consider caching');
+    });
+
+    test('CODE_REPRO_001: if/else alias + join arg snippet without actions does not flag', () => {
+        const code = [
+            'a = spark.read.parquet("path")',
+            'a = a.dropna()',
+            'if cond is None:',
+            '    b = a',
+            'else:',
+            '    b = merged_df.join(a, on=["aa", "bb"], how="inner")',
+        ].join('\n');
+        const issues = analyzeCode(code, { enableRepeatedScanDetection: true });
+        assert.ok(!issues.some(i => i.id === 'CODE_REPRO_001'), 'no actions in snippet — should not flag');
+    });
+
+    test('CODE_REPRO_001: disabled by default — no flag without opt-in', () => {
+        const code = [
+            'df = spark.read.parquet("path")',
+            'df.count()',
+            'df.show()',
+        ].join('\n');
+        // Default call with no options — feature disabled
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_REPRO_001'), 'feature is disabled by default');
     });
 });

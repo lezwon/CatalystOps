@@ -475,7 +475,11 @@ function isInsideComment(line: string, column: number): boolean {
  * Analyze code for PySpark anti-patterns.
  * Returns issues with exact line/column positions for VS Code diagnostics.
  */
-export function analyzeCode(code: string): CodeIssue[] {
+export interface AnalyzeOptions {
+    enableRepeatedScanDetection?: boolean;
+}
+
+export function analyzeCode(code: string, options: AnalyzeOptions = {}): CodeIssue[] {
     const issues: CodeIssue[] = [];
     const lines = code.split('\n');
 
@@ -713,64 +717,130 @@ df = reduce(
         }
     }
 
-    // Repeated source scan detection: a DataFrame read from a source
-    // (spark.read.*, spark.table(), spark.sql(), spark.createDataFrame()) that is
-    // referenced 2+ times without .cache()/.persist() before the second use will
-    // trigger a full re-scan of the underlying data for each use.
+    // Repeated source scan detection with alias and derived-lineage tracking.
+    // Opt-in only — disabled by default (catalystops.analysis.enableRepeatedScanDetection).
+    if (options.enableRepeatedScanDetection) {
+    //
+    // A DataFrame read from a source (spark.read.*, spark.table(), spark.sql(),
+    // spark.createDataFrame()) that triggers 2+ Spark actions without a
+    // .cache()/.persist() boundary forces a full re-scan each time.
+    //
+    // Beyond tracking the original variable we follow:
+    //   • Pure aliases:       df2 = df
+    //   • Lazy derived vars:  df2 = df.filter(...)  /  df2 = df.select(...)
+    // transitively — so actions on df2/df3/... count against the source's
+    // scan tally. Lines that assign a new variable via a lazy transform are
+    // NOT themselves counted as scans (they just extend the lineage set).
     {
+        // Terminal PySpark methods that trigger a Spark job (force execution).
+        const ACTION_RE = /\.(count|collect|show|take|first|toPandas|head|write\b|saveAsTable|writeTo|foreach(?:Partition)?|toLocalIterator|isEmpty|reduce)\s*[.(]/i;
+
         const srcRe = /^[ \t]*(\w+)\s*=\s*(?:\w+\.read\.|\bspark\.table\s*\(|\bspark\.sql\s*\(|\bspark\.createDataFrame\s*\()/gm;
+        srcRe.lastIndex = 0;
+
+        const sourceDefs: Array<{ varName: string; defLine: number; defCol: number; matchLen: number }> = [];
         let sm: RegExpExecArray | null;
         while ((sm = srcRe.exec(code)) !== null) {
             const varName = sm[1];
             const defOffset = sm.index;
             const defLine = code.substring(0, defOffset).split('\n').length - 1;
             const defLineText = lines[defLine] ?? '';
-            const defLineStart = code.lastIndexOf('\n', defOffset - 1) + 1;
-            const defCol = defOffset - defLineStart;
             if (defLineText.trim().startsWith('#')) { continue; }
             if (/# noqa: catalystops\b/i.test(defLineText)) { continue; }
+            const defLineStart = code.lastIndexOf('\n', defOffset - 1) + 1;
+            sourceDefs.push({ varName, defLine, defCol: defOffset - defLineStart, matchLen: sm[0].trimEnd().length });
+        }
 
-            const refRe = new RegExp(`\\b${varName}\\b`);
-            const reDefRe = new RegExp(`^[ \\t]*${varName}\\s*=\\s*(?:\\w+\\.read\\.|\\bspark\\.table\\s*\\(|\\bspark\\.sql\\s*\\(|\\bspark\\.createDataFrame\\s*\\()`);
-            const lazyRe = new RegExp(`^[ \\t]*${varName}\\s*=\\s*${varName}\\b`);
-            const cacheRe = new RegExp(`\\b${varName}\\b\\.(?:cache|persist)\\s*\\(`);
-
-            const refLines: number[] = [];
+        for (const { varName, defLine, defCol, matchLen } of sourceDefs) {
+            // tracked: all vars that transitively derive from this source
+            // (starts with the source var itself; aliases + lazy-derived vars are added as we scan)
+            const tracked = new Set<string>([varName]);
+            const scanLines: number[] = [];
             let cacheFoundLine = -1;
+
+            // Stop scanning if the primary source var is redefined from a new source
+            const reDefRe = new RegExp(
+                `^[ \\t]*${varName}\\s*=\\s*(?:\\w+\\.read\\.|\\bspark\\.table\\s*\\(|\\bspark\\.sql\\s*\\(|\\bspark\\.createDataFrame\\s*\\()`
+            );
 
             for (let i = defLine + 1; i < lines.length; i++) {
                 const lineText = lines[i];
                 if (lineText.trim() === '' || lineText.trim().startsWith('#')) { continue; }
                 if (/# noqa: catalystops\b/i.test(lineText)) { continue; }
+                if (reDefRe.test(lineText)) { break; }
 
-                // Var is redefined from a new source — stop tracking this definition
-                if (reDefRe.test(lineText) && !lazyRe.test(lineText)) { break; }
+                // Fast skip: no tracked variable mentioned on this line at all
+                let hasTrackedRef = false;
+                for (const v of tracked) {
+                    if (new RegExp(`\\b${v}\\b`).test(lineText)) { hasTrackedRef = true; break; }
+                }
+                if (!hasTrackedRef) { continue; }
 
-                // Detect cache/persist before checking if it's a ref
-                if (cacheFoundLine === -1 && cacheRe.test(lineText)) {
-                    cacheFoundLine = i;
+                // cache/persist on any tracked var → record materialisation boundary, skip (not a scan)
+                let isCacheLine = false;
+                for (const v of tracked) {
+                    if (new RegExp(`\\b${v}\\b\\.(?:cache|persist)\\s*\\(`).test(lineText)) {
+                        if (cacheFoundLine === -1) { cacheFoundLine = i; }
+                        isCacheLine = true;
+                        break;
+                    }
+                }
+                if (isCacheLine) { continue; }
+
+                // Classify the line: managed (lazy alias/derived → extend lineage) or scan
+                const hasAction = ACTION_RE.test(lineText);
+                let isManagedLine = false;
+                for (const v of tracked) {
+                    // Pure alias:  new_var = v   (nothing after v except optional comment)
+                    const aliasMatch = new RegExp(`^[ \\t]*(\\w+)\\s*=\\s*${v}\\s*(?:#|$)`).exec(lineText);
+                    if (aliasMatch) {
+                        if (!tracked.has(aliasMatch[1])) { tracked.add(aliasMatch[1]); }
+                        isManagedLine = true;
+                        break;
+                    }
+
+                    // Lazy derived:  new_var = v.lazy_method(  AND no action anywhere in the line.
+                    // If an action method appears in the chain (e.g. df.filter(...).count())
+                    // the whole expression is a scan, not a lazy build.
+                    if (!hasAction) {
+                        const derivedMatch = new RegExp(`^[ \\t]*(\\w+)\\s*=\\s*${v}\\.(\\w+)\\s*[\\[(]`).exec(lineText);
+                        if (derivedMatch) {
+                            const newVar = derivedMatch[1];
+                            if (!tracked.has(newVar)) { tracked.add(newVar); }
+                            isManagedLine = true;
+                            break;
+                        }
+                    }
                 }
 
-                // Skip lazy transformation reassignments: `varName = varName.method(...)`
-                if (lazyRe.test(lineText)) { continue; }
+                // General fallback: any assignment where a tracked var appears as an
+                // argument (not the chain base) and no action fires is lazy.
+                // Handles:  b = other_df.join(a, ...)
+                //           result = some_func(a, b)
+                // The LHS var derives transitively from the source — add it to tracked.
+                if (!isManagedLine && !hasAction) {
+                    const generalAssign = /^[ \t]*(\w+)\s*=/.exec(lineText);
+                    if (generalAssign) {
+                        const newVar = generalAssign[1];
+                        if (!tracked.has(newVar)) { tracked.add(newVar); }
+                        isManagedLine = true;
+                    }
+                }
 
-                if (refRe.test(lineText)) {
-                    refLines.push(i);
+                if (!isManagedLine) {
+                    scanLines.push(i);
                 }
             }
 
-            if (refLines.length < 2) { continue; }
-
-            // If cache/persist is found before (or on) the second reference, no issue
-            const secondRefLine = refLines[1];
-            if (cacheFoundLine !== -1 && cacheFoundLine <= secondRefLine) { continue; }
+            if (scanLines.length < 2) { continue; }
+            if (cacheFoundLine !== -1 && cacheFoundLine <= scanLines[1]) { continue; }
 
             issues.push({
                 id: 'CODE_REPRO_001',
                 severity: Severity.WARNING,
                 category: IssueCategory.CODE,
-                title: `"${varName}" scanned ${refLines.length}× — consider caching`,
-                description: `"${varName}" is used ${refLines.length} times after being read from a source without .cache() or .persist(). Each use triggers a full re-scan of the underlying data, which can be very expensive on large datasets.`,
+                title: `"${varName}" scanned ${scanLines.length}× — consider caching`,
+                description: `"${varName}" is read from a source and used ${scanLines.length} times (lines ${scanLines.map(l => l + 1).join(', ')}) without .cache() or .persist(). Each use triggers a full re-scan of the underlying data, which can be very expensive on large datasets.`,
                 fix: {
                     description: 'Call .cache() or .persist() immediately after reading the DataFrame',
                     code: `${varName} = spark.read.parquet("path")
@@ -782,11 +852,12 @@ ${varName} = spark.read.parquet("path").cache()`,
                 line: defLine,
                 column: defCol,
                 endLine: defLine,
-                endColumn: defCol + sm[0].trimEnd().length,
+                endColumn: defCol + matchLen,
                 location: `Line ${defLine + 1}`,
             });
         }
     }
+    } // end enableRepeatedScanDetection
 
     // Schema validation: column name and type checks
     const schemaIssues = validateSchema(code);

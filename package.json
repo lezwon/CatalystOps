@@ -102,6 +102,11 @@
           "default": true,
           "description": "Enable local anti-pattern detection (no cluster needed)"
         },
+        "catalystops.analysis.enableRepeatedScanDetection": {
+          "type": "boolean",
+          "default": false,
+          "description": "Warn when a source DataFrame (spark.read.*, spark.table, spark.sql) is used multiple times without .cache() or .persist(). Tracks aliases and derived DataFrames transitively. Disable if you see false positives in complex DAGs."
+        },
         "catalystops.cost.dbuRatePerHour": {
           "type": "number",
           "default": 0.4,

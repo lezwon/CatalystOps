@@ -112,7 +112,10 @@ export function activate(context: vscode.ExtensionContext): void {
 function runLocalAnalysis(document: vscode.TextDocument, issuesTreeProvider: IssuesTreeDataProvider): void {
     try {
         const code = document.getText();
-        const allIssues = [...analyzeCode(code), ...validateSchema(code)];
+        const cfg = vscode.workspace.getConfiguration('catalystops');
+        const allIssues = [...analyzeCode(code, {
+            enableRepeatedScanDetection: cfg.get<boolean>('analysis.enableRepeatedScanDetection', false),
+        }), ...validateSchema(code)];
 
         // When a schema-aware _002 issue fires on a line, suppress the generic _001
         // warning for the same line to avoid duplicate diagnostics.

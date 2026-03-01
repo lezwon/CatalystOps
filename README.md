@@ -33,7 +33,8 @@ Detects anti-patterns instantly via regex-based pattern matching with full comme
 | Severity | Checks |
 |----------|--------|
 | **Critical** | `collect()`, `crossJoin()`, SQL injection via f-strings in `spark.sql()` |
-| **Warning** | `collect()` on streaming (cross-batch stateful dedup), `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `withColumn` in loops, `.rdd` conversion, `checkpoint()`, source DataFrame used 2+ times without caching, `Window.orderBy()` without `partitionBy` (global window), AQE disabled via `spark.conf.set`, deprecated pandas `.append()`, non-deterministic UDFs, **unknown column names**, **type mismatches** (numeric / string / date / array functions on wrong column type) |
+| **Warning** | `collect()` on streaming (cross-batch stateful dedup), `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `withColumn` in loops, `.rdd` conversion, `checkpoint()`, `Window.orderBy()` without `partitionBy` (global window), AQE disabled via `spark.conf.set`, deprecated pandas `.append()`, non-deterministic UDFs, **unknown column names**, **type mismatches** (numeric / string / date / array functions on wrong column type) |
+| **Warning** _(opt-in)_ | Source DataFrame used 2+ times without `.cache()` / `.persist()` — tracks aliases and derived DataFrames transitively. Enable via `catalystops.analysis.enableRepeatedScanDetection`. |
 | **Info** | UDF usage, schema inference, chained `.filter()`, `show()` / `display()` in production, `cache()` without `unpersist()`, `select("*")`, global `orderBy`, missing write mode, `pandas_udf`, `to_pandas_on_spark()`, static partition overwrite without dynamic config, `Table May Lack Statistics` |
 
 Each issue shows a **one-line explanation** and a **quick fix code block** on hover.
@@ -329,6 +330,7 @@ Leave **Cluster ID blank** in the configuration wizard — CatalystOps automatic
 | `catalystops.databricks.executionMode` | `cluster` | `cluster` or `serverless` — auto-set to `serverless` when cluster ID is blank |
 | `catalystops.analysis.autoAnalyzeOnSave` | `false` | Auto-analyze on save |
 | `catalystops.analysis.enableLocalCodeAnalysis` | `true` | Enable local anti-pattern detection |
+| `catalystops.analysis.enableRepeatedScanDetection` | `false` | Warn when a source DataFrame (`spark.read.*`, `spark.table`, `spark.sql`) is used 2+ times without `.cache()` or `.persist()`. Tracks aliases and derived DataFrames transitively. Disabled by default — enable if you want to audit scan reuse in complex pipelines. |
 | `catalystops.cost.dbuRatePerHour` | `0.4` | DBU rate ($/hr) for interactive cluster cost estimation |
 | `catalystops.cost.serverlessRatePerHour` | `0.7` | Effective hourly cost ($/hr) for serverless runs, used with data-volume-based estimation. Rough guide: DBU rate × expected DBUs/hour for your workload |
 | `catalystops.cost.queryBillingUsage` | `false` | After each serverless dry run, submit a background job that queries `system.billing.usage` to fetch actual DBU consumption and show the real cost. Requires Unity Catalog System Tables |
