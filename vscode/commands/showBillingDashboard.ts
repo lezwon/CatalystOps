@@ -53,6 +53,15 @@ export async function showBillingDashboard(
         let rows = forceRefresh ? null : await loadFromCache(context, key);
 
         if (!rows) {
+            const choice = await vscode.window.showInformationMessage(
+                'Fetching billing data will start your SQL warehouse compute if it is not already running.',
+                { modal: true },
+                'Proceed',
+            );
+            if (choice !== 'Proceed') {
+                treeProvider.setLoading(false);
+                return;
+            }
             const fetchStart = Date.now();
             rows = await fetchBillingRows(config, startDate, endDate, context);
             const durationMs = Date.now() - fetchStart;
