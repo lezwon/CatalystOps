@@ -303,6 +303,64 @@ When a Databricks connection is configured, CatalystOps submits a neutralized ve
 
 ---
 
+### MCP Server — AI Assistant Integration
+
+CatalystOps exposes its analysis data as an **MCP (Model Context Protocol) server** so that AI assistants — Claude, GitHub Copilot (VS Code 1.99+), Cursor, and any other MCP-compatible client — can read live analysis results without any copy/paste.
+
+The server starts automatically when the extension activates and runs **in-process** on a dynamic port. The port is printed to the CatalystOps Output panel on startup:
+
+```
+CatalystOps: MCP server listening on http://127.0.0.1:49312/mcp
+```
+
+#### Tools (AI can call)
+
+| Tool | Input | What it returns |
+|------|-------|-----------------|
+| `analyze_pyspark` | `{ code: string }` | Static issues (id, severity, line, title, description, fix) for any code snippet — no cluster required |
+| `get_active_file_issues` | _(none)_ | Issues + file path for the currently open VS Code editor |
+| `get_billing_summary` | `{ period?: "day"\|"week"\|"month" }` | totalDollars, DBUs, byUser, byJob, byWorkload — reads the local 1-hour cache |
+| `refresh_billing` | `{ period?: "day"\|"week"\|"month" }` | Forces a live Databricks SQL query and returns updated billing data |
+| `get_plan_analysis` | _(none)_ | Parsed plan issues from the last dry run: join types, shuffle count, repeated scans, cache spills |
+| `run_dry_run` | _(none)_ | Triggers a Databricks dry run on the active file and returns physical/logical plan text + parsed issues |
+
+#### Resources (AI can read as context)
+
+| URI | Content |
+|-----|---------|
+| `catalystops://issues/current` | Markdown table of local analysis issues for the active file |
+| `catalystops://plans/last` | Raw Catalyst physical + analyzed logical plan text from the last dry run |
+| `catalystops://billing/summary` | Markdown billing snapshot (last cached period) |
+
+#### Prompts
+
+| Name | Description |
+|------|-------------|
+| `pyspark_code_review` | Injects local findings + plan issues as context for a code review prompt |
+| `optimize_spark_plan` | Injects raw Catalyst plan text and asks the model for optimization recommendations |
+
+#### Connecting AI clients
+
+**VS Code Copilot (v1.99+)** — auto-discovered automatically. CatalystOps tools appear in Copilot Chat under `@`.
+
+**Claude Desktop / Cursor / other MCP clients** — add the server manually using the port shown in the Output panel:
+
+```json
+{
+  "servers": {
+    "catalystops": {
+      "url": "http://127.0.0.1:<port>/mcp"
+    }
+  }
+}
+```
+
+For Claude Desktop, add this to `claude_desktop_config.json`. For Cursor, add it to MCP settings.
+
+> The port changes on each VS Code restart. For a stable port, connect after reading it from the Output panel. MCP clients that support dynamic discovery via VS Code will handle this automatically.
+
+---
+
 ### Editor Integration
 
 - **Inline diagnostics** — squiggly underlines with exact line/column positions, visible in the Problems panel
@@ -495,7 +553,12 @@ Local `.py` files imported by your script are automatically detected and bundled
               │  VS Code Diagnostics +      │     │  Billing Query (opt-in)  │
               │  Hover Cards + Tree View +  │     │  system.billing.usage    │
               │  Status Bar + HTML Report   │     │  → actual DBU cost toast │
-              └─────────────────────────────┘     └──────────────────────────┘
+              └──────────┬──────────────────┘     └──────────────────────────┘
+                         │  updateMcpSnapshot()
+              ┌──────────▼──────────────────┐
+              │  MCP Server (in-process)    │──▶ Claude / Copilot / Cursor
+              │  127.0.0.1:<port>/mcp       │    tools, resources, prompts
+              └─────────────────────────────┘
 ```
 
 ---
@@ -569,6 +632,9 @@ catalyst-ops/
 │   │   ├── codeLensProvider.ts
 │   │   ├── hoverProvider.ts      # Hover cards with quick-fix code blocks
 │   │   └── codeActionProvider.ts
+│   ├── mcp/
+│   │   ├── mcpState.ts           # In-memory snapshot updated after each local analysis
+│   │   └── server.ts             # MCP server: tools, resources, prompts; Streamable HTTP transport
 │   └── views/
 │       ├── statusBar.ts
 │       ├── issuesTreeView.ts     # Sidebar tree with progress, cost, and write summaries
@@ -577,6 +643,7 @@ catalyst-ops/
 ├── test/
 │   └── suite/
 │       ├── codeAnalyzer.test.ts
+│       ├── mcpState.test.ts      # MCP state snapshots + analyze_pyspark tool contract
 │       ├── planParser.test.ts
 │       ├── safetyWrapper.test.ts
 │       ├── schemaValidator.test.ts

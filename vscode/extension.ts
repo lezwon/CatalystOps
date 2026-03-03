@@ -24,6 +24,8 @@ import { IssuesTreeDataProvider } from './views/issuesTreeView';
 import { BillingTreeDataProvider } from './views/billingTreeView';
 import { showBillingDashboard } from './commands/showBillingDashboard';
 import { Severity } from './models/types';
+import { startMcpServer, stopMcpServer } from './mcp/server';
+import { updateMcpSnapshot } from './mcp/mcpState';
 
 export function activate(context: vscode.ExtensionContext): void {
     initOutputChannel(context);
@@ -57,6 +59,27 @@ export function activate(context: vscode.ExtensionContext): void {
             vscode.commands.registerCommand('catalystops.refreshBilling',
                 () => showBillingDashboard(context, billingTreeProvider, undefined, undefined, true)),
         );
+
+        // Start MCP server (in-process, Streamable HTTP on a dynamic port)
+        startMcpServer(context).then(port => {
+            logDebug(`MCP server listening on http://127.0.0.1:${port}/mcp`);
+            // VS Code 1.99+ MCP auto-discovery via registerMcpServerDefinitionProvider
+            if ('lm' in vscode && typeof (vscode.lm as any).registerMcpServerDefinitionProvider === 'function') {
+                const registration = (vscode.lm as any).registerMcpServerDefinitionProvider('catalystops', {
+                    provideMcpServerDefinitions: () => [
+                        {
+                            label: 'CatalystOps',
+                            url: vscode.Uri.parse(`http://127.0.0.1:${port}/mcp`),
+                        },
+                    ],
+                });
+                context.subscriptions.push(registration);
+            }
+            // Register stop on deactivate
+            context.subscriptions.push({ dispose: () => { void stopMcpServer(); } });
+        }).catch(err => {
+            logDebug(`MCP server failed to start: ${err instanceof Error ? err.message : String(err)}`);
+        });
 
         // Register providers for Python files
         const pythonSelector: vscode.DocumentSelector = { language: 'python', scheme: 'file' };
@@ -155,6 +178,7 @@ function runLocalAnalysis(document: vscode.TextDocument, issuesTreeProvider: Iss
 
         setCodeIssueDiagnostics(document.uri, issues);
         issuesTreeProvider.updateFromCodeIssues(issues);
+        updateMcpSnapshot({ filePath: document.fileName, issues, updatedAt: new Date() });
 
         const critical = issues.filter(i => i.severity === Severity.CRITICAL).length;
         const warnings = issues.filter(i => i.severity === Severity.WARNING).length;
