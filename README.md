@@ -32,12 +32,45 @@ Detects anti-patterns instantly via regex-based pattern matching with full comme
 
 | Severity | Checks |
 |----------|--------|
-| **Critical** | `collect()`, `crossJoin()`, SQL injection via f-strings in `spark.sql()` |
-| **Warning** | `collect()` on streaming (cross-batch stateful dedup), `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `withColumn` in loops, `.rdd` conversion, `checkpoint()`, `Window.orderBy()` without `partitionBy` (global window), AQE disabled via `spark.conf.set`, deprecated pandas `.append()`, non-deterministic UDFs, **unknown column names**, **type mismatches** (numeric / string / date / array functions on wrong column type) |
+| **Critical** | `collect()`, `crossJoin()`, SQL injection via f-strings in `spark.sql()`, `kafka.enable.auto.commit = true`, `APPLY AS DELETE WHEN` after `SEQUENCE BY` in DLT AUTO CDC |
+| **Warning** | `collect()` on streaming (cross-batch stateful dedup), `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `withColumn` in loops, `.rdd` conversion, `checkpoint()`, `Window.orderBy()` without `partitionBy` (global window), AQE disabled via `spark.conf.set`, deprecated pandas `.append()`, non-deterministic UDFs, **unknown column names**, **type mismatches** (numeric / string / date / array functions on wrong column type), streaming checkpoint on DBFS (`/dbfs/` or `dbfs:/`), `.writeStream.start()` without `.trigger()`, `.groupBy()` on streaming DataFrame without `.withWatermark()`, `DROP TABLE` + `CREATE TABLE` (use `CREATE OR REPLACE TABLE`), `dynamicAllocation.enabled = true` on streaming cluster, `FloatType`/`DoubleType` for financial columns (use `DecimalType`), `OPTIMIZE` after every `MERGE` in `foreachBatch`, inner join in streaming file (silently drops unmatched events), `read_files()` without `schemaHints` in DLT pipeline, `PARTITION BY` instead of `CLUSTER BY` in DLT table |
 | **Warning** _(opt-in)_ | Source DataFrame used 2+ times without `.cache()` / `.persist()` — tracks aliases and derived DataFrames transitively. Enable via `catalystops.analysis.enableRepeatedScanDetection`. |
-| **Info** | UDF usage, schema inference, chained `.filter()`, `show()` / `display()` in production, `cache()` without `unpersist()`, `select("*")`, global `orderBy`, missing write mode, `pandas_udf`, `to_pandas_on_spark()`, static partition overwrite without dynamic config, `Table May Lack Statistics` |
+| **Info** | UDF usage, schema inference, chained `.filter()`, `show()` / `display()` in production, `cache()` without `unpersist()`, `select("*")`, global `orderBy`, missing write mode, `pandas_udf`, `to_pandas_on_spark()`, static partition overwrite without dynamic config, `Table May Lack Statistics`, `ZORDER BY` (use Liquid Clustering), missing `.option("queryName", ...)` on streaming query, no `ANALYZE TABLE` after overwrite, `MERGE` without Deletion Vectors (`delta.enableDeletionVectors`), `MERGE` without Row-Level Concurrency (`delta.enableRowLevelConcurrency`), Auto Loader without `maxBytesPerTrigger`, stateful streaming without RocksDB state store, `SELECT *` in DLT pipeline, `CLUSTER BY AUTO` in production DLT table |
 
 Each issue shows a **one-line explanation** and a **quick fix code block** on hover.
+
+#### Streaming & Delta Checks
+
+| Issue ID | Severity | What it detects |
+|----------|----------|-----------------|
+| `CODE_KAFKA_001` | **Critical** | `kafka.enable.auto.commit = true` — Kafka manages offsets independently of Spark's checkpoint, causing data loss or duplication |
+| `CODE_STREAM_TRIGGER_001` | **Warning** | `.writeStream.start()` without `.trigger()` — continuous micro-batches cause excessive cloud storage listing and unpredictable compute costs |
+| `CODE_DBFS_CHECKPOINT_001` | **Warning** | Streaming checkpoint stored on DBFS (`/dbfs/` or `dbfs:/`) — DBFS is unreliable for checkpoint storage; use Unity Catalog Volumes or S3/ADLS |
+| `CODE_STREAM_WATERMARK_001` | **Warning** | `.groupBy()` on a streaming DataFrame without a preceding `.withWatermark()` — state grows unbounded, causing OOM failures |
+| `CODE_STREAM_JOIN_001` | **Warning** | Default inner join in a streaming file — silently drops events with no matching dimension record; use `how="left"` to preserve all events |
+| `CODE_DROP_CREATE_001` | **Warning** | `DROP TABLE` followed by `CREATE TABLE` within 5 lines — non-atomic, breaks concurrent readers and deletes time-travel history; use `CREATE OR REPLACE TABLE` |
+| `CODE_DYN_ALLOC_STREAM_001` | **Warning** | `spark.dynamicAllocation.enabled = true` in a streaming script — causes latency spikes and executor churn; use a fixed-size cluster for streaming |
+| `CODE_FLOAT_FINANCIAL_001` | **Warning** | `FloatType` or `DoubleType` for columns named `price`, `amount`, `revenue`, `cost`, etc. — binary floating-point causes silent rounding errors; use `DecimalType(18, 2)` |
+| `CODE_MERGE_OPTIMIZE_001` | **Warning** | `OPTIMIZE` immediately after `MERGE INTO` — runs full compaction on every batch; enable Liquid Clustering (`CLUSTER BY`) to compact incrementally instead |
+| `CODE_ZORDER_001` | **Info** | `ZORDER BY` / `Z-ORDER BY` — legacy optimization that rewrites the full table on each OPTIMIZE run; replace with `CLUSTER BY` (Liquid Clustering) |
+| `CODE_STREAM_QUERYNAME_001` | **Info** | `.writeStream.start()` without `.option("queryName", ...)` — unnamed queries appear as random UUIDs in the Spark UI and structured streaming metrics |
+| `CODE_ANALYZE_001` | **Info** | `mode("overwrite").saveAsTable(...)` or `INSERT OVERWRITE` without `ANALYZE TABLE` — stale statistics cause suboptimal join and partition decisions |
+| `CODE_MERGE_DV_001` | **Info** | `MERGE INTO` without `delta.enableDeletionVectors = true` — every update/delete physically rewrites files; Deletion Vectors convert these to cheap soft-deletes |
+| `CODE_MERGE_RLC_001` | **Info** | `MERGE INTO` without `delta.enableRowLevelConcurrency = true` — concurrent MERGEs conflict at the file level; Row-Level Concurrency eliminates unnecessary conflicts |
+| `CODE_AUTOLOADER_RATE_001` | **Info** | Auto Loader stream (`cloudFiles.format`) without `maxBytesPerTrigger` — no backlog protection; a large backlog is processed in a single OOM-prone batch |
+| `CODE_ROCKSDB_001` | **Info** | Stateful streaming operation (`.groupBy()`, `flatMapGroupsWithState`) without RocksDB state store configured — the default in-memory store will OOM for large state; enable `RocksDBStateProvider` |
+
+#### DLT / Spark Declarative Pipeline Checks
+
+These checks only fire in files that contain DLT syntax (`@dlt.table`, `@dp.table`, `APPLY CHANGES INTO`, `CREATE STREAMING LIVE TABLE`, etc.).
+
+| Issue ID | Severity | What it detects |
+|----------|----------|-----------------|
+| `CODE_DLT_PARTITION_001` | **Warning** | `PARTITION BY` on a DLT table — creates fixed-layout partitions requiring manual OPTIMIZE; use `CLUSTER BY` (Liquid Clustering) instead |
+| `CODE_DLT_SCHEMA_HINTS_001` | **Warning** | `read_files()` without `schemaHints` — full schema inference is slow on startup and breaks on type changes; pin critical column types with `schemaHints` |
+| `CODE_DLT_CDC_ORDER_001` | **Critical** | `APPLY AS DELETE WHEN` placed after `SEQUENCE BY` in an `APPLY CHANGES INTO` block — the correct order is `APPLY AS DELETE WHEN` first, then `SEQUENCE BY` |
+| `CODE_DLT_SELECT_STAR_001` | **Info** | `SELECT *` in a DLT pipeline — reads all columns unnecessarily; select only the columns downstream consumers need |
+| `CODE_DLT_CLUSTER_AUTO_001` | **Info** | `CLUSTER BY AUTO` in a production DLT table — useful for prototyping; for production tables under 10 TB, explicit keys chosen to match query patterns will outperform AUTO |
 
 ---
 

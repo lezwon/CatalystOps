@@ -435,4 +435,541 @@ spark.sql(f"SELECT * FROM {table}")
         const issues = analyzeCode(code);
         assert.ok(!issues.some(i => i.id === 'CODE_REPRO_001'), 'feature is disabled by default');
     });
+
+    // ── Kafka auto-commit (CODE_KAFKA_001) ───────────────────────────────────
+
+    test('CODE_KAFKA_001: flags kafka.enable.auto.commit = true (string)', () => {
+        const code = '.option("kafka.enable.auto.commit", "true")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_KAFKA_001'), 'should flag kafka auto-commit enabled');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_KAFKA_001')!.severity, 'critical');
+    });
+
+    test('CODE_KAFKA_001: flags kafka.enable.auto.commit = True (Python bool)', () => {
+        const code = ".option('kafka.enable.auto.commit', True)";
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_KAFKA_001'), 'should flag Python True');
+    });
+
+    test('no CODE_KAFKA_001 when auto-commit is false', () => {
+        const code = '.option("kafka.enable.auto.commit", "false")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_KAFKA_001'), 'false should not be flagged');
+    });
+
+    // ── DBFS checkpoint (CODE_DBFS_CHECKPOINT_001) ───────────────────────────
+
+    test('CODE_DBFS_CHECKPOINT_001: flags /dbfs/ checkpoint path', () => {
+        const code = '.option("checkpointLocation", "/dbfs/checkpoints/stream")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_DBFS_CHECKPOINT_001'), 'should flag /dbfs/ checkpoint');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_DBFS_CHECKPOINT_001')!.severity, 'warning');
+    });
+
+    test('CODE_DBFS_CHECKPOINT_001: flags dbfs:/ checkpoint path', () => {
+        const code = '.option("checkpointLocation", "dbfs:/checkpoints/stream")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_DBFS_CHECKPOINT_001'), 'should flag dbfs:/ checkpoint');
+    });
+
+    test('no CODE_DBFS_CHECKPOINT_001 for Unity Catalog Volume path', () => {
+        const code = '.option("checkpointLocation", "/Volumes/catalog/schema/checkpoints/stream")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_DBFS_CHECKPOINT_001'), 'UC Volume path should not be flagged');
+    });
+
+    test('no CODE_DBFS_CHECKPOINT_001 for S3 path', () => {
+        const code = '.option("checkpointLocation", "s3://bucket/checkpoints/stream")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_DBFS_CHECKPOINT_001'), 'S3 path should not be flagged');
+    });
+
+    // ── Streaming trigger (CODE_STREAM_TRIGGER_001) ──────────────────────────
+
+    test('CODE_STREAM_TRIGGER_001: flags writeStream.start() without trigger', () => {
+        const code = [
+            'df.writeStream',
+            '    .format("delta")',
+            '    .option("checkpointLocation", "/Volumes/cp")',
+            '    .start()',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_STREAM_TRIGGER_001'), 'missing trigger should be flagged');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_STREAM_TRIGGER_001')!.severity, 'warning');
+    });
+
+    test('no CODE_STREAM_TRIGGER_001 when processingTime trigger is set', () => {
+        const code = [
+            'df.writeStream',
+            '    .trigger(processingTime="5 minutes")',
+            '    .format("delta")',
+            '    .start()',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_STREAM_TRIGGER_001'), 'trigger present — should not flag');
+    });
+
+    test('no CODE_STREAM_TRIGGER_001 when availableNow trigger is set', () => {
+        const code = [
+            'df.writeStream',
+            '    .trigger(availableNow=True)',
+            '    .format("delta")',
+            '    .start()',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_STREAM_TRIGGER_001'), 'availableNow trigger — should not flag');
+    });
+
+    test('no CODE_STREAM_TRIGGER_001 when writeStream has no .start() (incomplete chain)', () => {
+        const code = 'query = df.writeStream.format("delta")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_STREAM_TRIGGER_001'), 'no .start() — should not flag');
+    });
+
+    // ── Streaming groupBy without watermark (CODE_STREAM_WATERMARK_001) ──────
+
+    test('CODE_STREAM_WATERMARK_001: flags groupBy on streaming DF without withWatermark', () => {
+        const code = [
+            'stream = spark.readStream.format("delta").table("events")',
+            'result = stream.groupBy("user_id").count()',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_STREAM_WATERMARK_001'), 'missing watermark should be flagged');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_STREAM_WATERMARK_001')!.severity, 'warning');
+    });
+
+    test('no CODE_STREAM_WATERMARK_001 when withWatermark precedes groupBy', () => {
+        const code = [
+            'stream = spark.readStream.format("delta").table("events")',
+            'result = stream.withWatermark("event_time", "1 hour").groupBy("user_id").count()',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_STREAM_WATERMARK_001'), 'watermark present — should not flag');
+    });
+
+    test('no CODE_STREAM_WATERMARK_001 when file has no readStream', () => {
+        const code = 'df.groupBy("user_id").count()';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_STREAM_WATERMARK_001'), 'no readStream — batch groupBy should not flag');
+    });
+
+    // ── DROP TABLE + CREATE TABLE (CODE_DROP_CREATE_001) ─────────────────────
+
+    test('CODE_DROP_CREATE_001: flags DROP TABLE followed by CREATE TABLE', () => {
+        const code = [
+            'spark.sql("DROP TABLE IF EXISTS my_table")',
+            'spark.sql("CREATE TABLE my_table (id BIGINT) USING DELTA")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_DROP_CREATE_001'), 'should flag DROP + CREATE pattern');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_DROP_CREATE_001')!.severity, 'warning');
+    });
+
+    test('CODE_DROP_CREATE_001: flags DROP TABLE + CREATE TABLE in same SQL block', () => {
+        const code = [
+            'spark.sql("""',
+            '    DROP TABLE IF EXISTS foo;',
+            '    CREATE TABLE foo (id BIGINT) USING DELTA',
+            '""")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_DROP_CREATE_001'), 'should flag in multi-line SQL block');
+    });
+
+    test('no CODE_DROP_CREATE_001 for DROP TABLE without CREATE TABLE', () => {
+        const code = 'spark.sql("DROP TABLE IF EXISTS my_table")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_DROP_CREATE_001'), 'DROP alone should not flag');
+    });
+
+    test('no CODE_DROP_CREATE_001 for standalone CREATE OR REPLACE TABLE', () => {
+        const code = 'spark.sql("CREATE OR REPLACE TABLE my_table (id BIGINT) USING DELTA")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_DROP_CREATE_001'), 'CREATE OR REPLACE alone should not flag');
+    });
+
+    // ── Z-ORDER instead of Liquid Clustering (CODE_ZORDER_001) ───────────────
+
+    test('CODE_ZORDER_001: flags ZORDER BY in OPTIMIZE statement', () => {
+        const code = 'spark.sql("OPTIMIZE my_table ZORDER BY (event_date, user_id)")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_ZORDER_001'), 'should flag ZORDER BY');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_ZORDER_001')!.severity, 'info');
+    });
+
+    test('CODE_ZORDER_001: flags Z-ORDER BY variant', () => {
+        const code = 'spark.sql("OPTIMIZE my_table Z-ORDER BY (col)")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_ZORDER_001'), 'should flag Z-ORDER BY');
+    });
+
+    test('no CODE_ZORDER_001 for CLUSTER BY (Liquid Clustering)', () => {
+        const code = 'spark.sql("CREATE TABLE t USING DELTA CLUSTER BY (event_date)")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_ZORDER_001'), 'CLUSTER BY should not flag');
+    });
+
+    // ── Dynamic allocation on streaming (CODE_DYN_ALLOC_STREAM_001) ──────────
+
+    test('CODE_DYN_ALLOC_STREAM_001: flags dynamic allocation enabled (string true)', () => {
+        const code = 'spark.conf.set("spark.dynamicAllocation.enabled", "true")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_DYN_ALLOC_STREAM_001'), 'should flag dynamic allocation');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_DYN_ALLOC_STREAM_001')!.severity, 'warning');
+    });
+
+    test('CODE_DYN_ALLOC_STREAM_001: flags dynamic allocation enabled (Python True)', () => {
+        const code = "spark.conf.set('spark.dynamicAllocation.enabled', True)";
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_DYN_ALLOC_STREAM_001'), 'should flag Python True');
+    });
+
+    test('no CODE_DYN_ALLOC_STREAM_001 when set to false', () => {
+        const code = 'spark.conf.set("spark.dynamicAllocation.enabled", "false")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_DYN_ALLOC_STREAM_001'), 'false should not be flagged');
+    });
+
+    // ── Missing queryName on streaming (CODE_STREAM_QUERYNAME_001) ───────────
+
+    test('CODE_STREAM_QUERYNAME_001: flags writeStream.start() without queryName', () => {
+        const code = [
+            'df.writeStream',
+            '    .format("delta")',
+            '    .option("checkpointLocation", "/Volumes/cp")',
+            '    .start()',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_STREAM_QUERYNAME_001'), 'missing queryName should be flagged');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_STREAM_QUERYNAME_001')!.severity, 'info');
+    });
+
+    test('no CODE_STREAM_QUERYNAME_001 when queryName is set', () => {
+        const code = [
+            'df.writeStream',
+            '    .option("queryName", "events_to_silver")',
+            '    .format("delta")',
+            '    .start()',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_STREAM_QUERYNAME_001'), 'queryName present — should not flag');
+    });
+
+    // ── FLOAT/DOUBLE for financial columns (CODE_FLOAT_FINANCIAL_001) ─────────
+
+    test('CODE_FLOAT_FINANCIAL_001: flags FloatType for price column', () => {
+        const code = 'StructField("price", FloatType())';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_FLOAT_FINANCIAL_001'), 'FloatType for price should be flagged');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_FLOAT_FINANCIAL_001')!.severity, 'warning');
+    });
+
+    test('CODE_FLOAT_FINANCIAL_001: flags DoubleType for amount column', () => {
+        const code = 'StructField("amount", DoubleType())';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_FLOAT_FINANCIAL_001'), 'DoubleType for amount should be flagged');
+    });
+
+    test('no CODE_FLOAT_FINANCIAL_001 for non-financial FloatType column', () => {
+        const code = 'StructField("latitude", FloatType())';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_FLOAT_FINANCIAL_001'), 'non-financial float should not flag');
+    });
+
+    test('no CODE_FLOAT_FINANCIAL_001 for DecimalType on financial column', () => {
+        const code = 'StructField("price", DecimalType(18, 2))';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_FLOAT_FINANCIAL_001'), 'DecimalType should not flag');
+    });
+
+    // ── OPTIMIZE after MERGE in foreachBatch (CODE_MERGE_OPTIMIZE_001) ────────
+
+    test('CODE_MERGE_OPTIMIZE_001: flags MERGE INTO followed by OPTIMIZE', () => {
+        const code = [
+            'spark.sql(f"MERGE INTO {target} USING source ON ...")',
+            'spark.sql(f"OPTIMIZE {target}")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_MERGE_OPTIMIZE_001'), 'MERGE + OPTIMIZE should be flagged');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_MERGE_OPTIMIZE_001')!.severity, 'warning');
+    });
+
+    test('no CODE_MERGE_OPTIMIZE_001 for MERGE without OPTIMIZE nearby', () => {
+        const code = 'spark.sql("MERGE INTO my_table USING source ON ...")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_MERGE_OPTIMIZE_001'), 'MERGE alone should not flag');
+    });
+
+    // ── Inner join in streaming context (CODE_STREAM_JOIN_001) ───────────────
+
+    test('CODE_STREAM_JOIN_001: flags default inner join in streaming file', () => {
+        const code = [
+            'stream = spark.readStream.format("delta").table("events")',
+            'enriched = stream.join(dim_df, "customer_id")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_STREAM_JOIN_001'), 'inner join in streaming should be flagged');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_STREAM_JOIN_001')!.severity, 'warning');
+    });
+
+    test('no CODE_STREAM_JOIN_001 when left join is specified', () => {
+        const code = [
+            'stream = spark.readStream.format("delta").table("events")',
+            'enriched = stream.join(dim_df, "customer_id", how="left")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_STREAM_JOIN_001'), 'left join should not flag');
+    });
+
+    test('no CODE_STREAM_JOIN_001 in batch file without readStream', () => {
+        const code = 'result = df1.join(df2, "id")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_STREAM_JOIN_001'), 'batch join without readStream should not flag');
+    });
+
+    // ── Missing ANALYZE TABLE after overwrite (CODE_ANALYZE_001) ─────────────
+
+    test('CODE_ANALYZE_001: flags mode(overwrite).saveAsTable without ANALYZE', () => {
+        const code = 'df.write.mode("overwrite").saveAsTable("my_catalog.my_table")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_ANALYZE_001'), 'overwrite without ANALYZE should be flagged');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_ANALYZE_001')!.severity, 'info');
+    });
+
+    test('no CODE_ANALYZE_001 when ANALYZE TABLE follows overwrite', () => {
+        const code = [
+            'df.write.mode("overwrite").saveAsTable("my_table")',
+            'spark.sql("ANALYZE TABLE my_table COMPUTE STATISTICS FOR ALL COLUMNS")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_ANALYZE_001'), 'ANALYZE present — should not flag');
+    });
+
+    test('CODE_ANALYZE_001: flags INSERT OVERWRITE without ANALYZE TABLE', () => {
+        const code = 'spark.sql("INSERT OVERWRITE my_table SELECT * FROM source")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_ANALYZE_001'), 'INSERT OVERWRITE without ANALYZE should flag');
+    });
+
+    // ── MERGE without Deletion Vectors (CODE_MERGE_DV_001) ───────────────────
+
+    test('CODE_MERGE_DV_001: flags MERGE INTO without enableDeletionVectors config', () => {
+        const code = 'spark.sql("MERGE INTO my_table USING source ON my_table.id = source.id WHEN MATCHED THEN UPDATE SET *")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_MERGE_DV_001'), 'MERGE without DV should be flagged');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_MERGE_DV_001')!.severity, 'info');
+    });
+
+    test('no CODE_MERGE_DV_001 when enableDeletionVectors is referenced', () => {
+        const code = [
+            'spark.sql("ALTER TABLE t SET TBLPROPERTIES (\'delta.enableDeletionVectors\' = \'true\')")',
+            'spark.sql("MERGE INTO t USING src ON t.id = src.id WHEN MATCHED THEN UPDATE SET *")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_MERGE_DV_001'), 'DV configured — should not flag');
+    });
+
+    // ── MERGE without Row-Level Concurrency (CODE_MERGE_RLC_001) ─────────────
+
+    test('CODE_MERGE_RLC_001: flags MERGE INTO without enableRowLevelConcurrency config', () => {
+        const code = 'spark.sql("MERGE INTO my_table USING source ON my_table.id = source.id WHEN MATCHED THEN UPDATE SET *")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_MERGE_RLC_001'), 'MERGE without RLC should be flagged');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_MERGE_RLC_001')!.severity, 'info');
+    });
+
+    test('no CODE_MERGE_RLC_001 when enableRowLevelConcurrency is referenced', () => {
+        const code = [
+            'spark.sql("ALTER TABLE t SET TBLPROPERTIES (\'delta.enableRowLevelConcurrency\' = \'true\')")',
+            'spark.sql("MERGE INTO t USING src ON t.id = src.id WHEN MATCHED THEN UPDATE SET *")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_MERGE_RLC_001'), 'RLC configured — should not flag');
+    });
+
+    // ── Auto Loader without maxBytesPerTrigger (CODE_AUTOLOADER_RATE_001) ─────
+
+    test('CODE_AUTOLOADER_RATE_001: flags Auto Loader stream without maxBytesPerTrigger', () => {
+        const code = [
+            'stream = (spark.readStream',
+            '    .format("cloudFiles")',
+            '    .option("cloudFiles.format", "json")',
+            '    .load(path))',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_AUTOLOADER_RATE_001'), 'missing maxBytesPerTrigger should flag');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_AUTOLOADER_RATE_001')!.severity, 'info');
+    });
+
+    test('no CODE_AUTOLOADER_RATE_001 when maxBytesPerTrigger is set', () => {
+        const code = [
+            'stream = (spark.readStream',
+            '    .format("cloudFiles")',
+            '    .option("cloudFiles.format", "json")',
+            '    .option("maxBytesPerTrigger", "100m")',
+            '    .load(path))',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_AUTOLOADER_RATE_001'), 'maxBytesPerTrigger set — should not flag');
+    });
+
+    // ── RocksDB not configured for stateful streaming (CODE_ROCKSDB_001) ──────
+
+    test('CODE_ROCKSDB_001: flags stateful streaming without RocksDB config', () => {
+        const code = [
+            'stream = spark.readStream.format("delta").table("events")',
+            'result = stream.withWatermark("event_time", "1 hour").groupBy("user_id").count()',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_ROCKSDB_001'), 'stateful streaming without RocksDB should flag');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_ROCKSDB_001')!.severity, 'info');
+    });
+
+    test('no CODE_ROCKSDB_001 when RocksDB state store is configured', () => {
+        const code = [
+            'spark.conf.set("spark.sql.streaming.stateStore.providerClass", "com.databricks.sql.streaming.state.RocksDBStateProvider")',
+            'stream = spark.readStream.format("delta").table("events")',
+            'result = stream.withWatermark("event_time", "1 hour").groupBy("user_id").count()',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_ROCKSDB_001'), 'RocksDB configured — should not flag');
+    });
+
+    test('no CODE_ROCKSDB_001 in batch file without readStream', () => {
+        const code = 'result = df.groupBy("user_id").count()';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_ROCKSDB_001'), 'batch groupBy without readStream should not flag');
+    });
+
+    // ── DLT: PARTITION BY instead of CLUSTER BY (CODE_DLT_PARTITION_001) ─────
+
+    test('CODE_DLT_PARTITION_001: flags PARTITION BY in a DLT file', () => {
+        const code = [
+            '@dlt.table()',
+            'def my_table():',
+            '    return spark.sql("CREATE OR REPLACE STREAMING LIVE TABLE t PARTITION BY (event_date) AS SELECT id FROM src")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_DLT_PARTITION_001'), 'PARTITION BY in DLT file should flag');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_DLT_PARTITION_001')!.severity, 'warning');
+    });
+
+    test('no CODE_DLT_PARTITION_001 in a non-DLT file', () => {
+        const code = 'df.write.mode("overwrite").partitionBy("event_date").parquet("path")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_DLT_PARTITION_001'), 'PARTITION BY outside DLT should not flag this check');
+    });
+
+    test('no CODE_DLT_PARTITION_001 when CLUSTER BY is used in DLT file', () => {
+        const code = [
+            '@dlt.table(cluster_by=["event_date"])',
+            'def my_table():',
+            '    return spark.sql("SELECT * FROM LIVE.src")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_DLT_PARTITION_001'), 'CLUSTER BY in DLT should not flag');
+    });
+
+    // ── DLT: SELECT * in pipeline (CODE_DLT_SELECT_STAR_001) ─────────────────
+
+    test('CODE_DLT_SELECT_STAR_001: flags SELECT * in a DLT SQL pipeline', () => {
+        const code = [
+            '@dlt.table()',
+            'def my_view():',
+            '    return spark.sql("SELECT * FROM LIVE.source_table")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_DLT_SELECT_STAR_001'), 'SELECT * in DLT file should flag');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_DLT_SELECT_STAR_001')!.severity, 'info');
+    });
+
+    test('no CODE_DLT_SELECT_STAR_001 in non-DLT file', () => {
+        const code = 'df.select("*")';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_DLT_SELECT_STAR_001'), 'SELECT * outside DLT should not flag this check');
+    });
+
+    // ── DLT: read_files() without schemaHints (CODE_DLT_SCHEMA_HINTS_001) ────
+
+    test('CODE_DLT_SCHEMA_HINTS_001: flags read_files() without schemaHints in DLT file', () => {
+        const code = [
+            '@dlt.table()',
+            'def bronze():',
+            '    return spark.sql(\'SELECT * FROM read_files("s3://bucket/events/", format => "json")\')',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_DLT_SCHEMA_HINTS_001'), 'read_files without schemaHints should flag');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_DLT_SCHEMA_HINTS_001')!.severity, 'warning');
+    });
+
+    test('no CODE_DLT_SCHEMA_HINTS_001 when schemaHints is provided', () => {
+        const code = [
+            '@dlt.table()',
+            'def bronze():',
+            '    return spark.sql(\'SELECT * FROM read_files("s3://bucket/events/", format => "json", schemaHints => "id BIGINT")\')',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_DLT_SCHEMA_HINTS_001'), 'schemaHints present — should not flag');
+    });
+
+    // ── DLT: APPLY AS DELETE WHEN after SEQUENCE BY (CODE_DLT_CDC_ORDER_001) ──
+
+    test('CODE_DLT_CDC_ORDER_001: flags APPLY AS DELETE WHEN after SEQUENCE BY', () => {
+        const code = [
+            'APPLY CHANGES INTO LIVE.target',
+            'FROM STREAM(LIVE.source)',
+            'KEYS (id)',
+            'SEQUENCE BY updated_at',
+            'APPLY AS DELETE WHEN operation = "DELETE"',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_DLT_CDC_ORDER_001'), 'DELETE WHEN after SEQUENCE BY should flag');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_DLT_CDC_ORDER_001')!.severity, 'critical');
+    });
+
+    test('no CODE_DLT_CDC_ORDER_001 when APPLY AS DELETE WHEN is before SEQUENCE BY', () => {
+        const code = [
+            'APPLY CHANGES INTO LIVE.target',
+            'FROM STREAM(LIVE.source)',
+            'KEYS (id)',
+            'APPLY AS DELETE WHEN operation = "DELETE"',
+            'SEQUENCE BY updated_at',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_DLT_CDC_ORDER_001'), 'correct order — should not flag');
+    });
+
+    // ── DLT: CLUSTER BY AUTO in production (CODE_DLT_CLUSTER_AUTO_001) ───────
+
+    test('CODE_DLT_CLUSTER_AUTO_001: flags CLUSTER BY AUTO in DLT file', () => {
+        const code = [
+            'CREATE OR REPLACE STREAMING LIVE TABLE my_table',
+            'CLUSTER BY AUTO',
+            'AS SELECT * FROM STREAM(LIVE.source)',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_DLT_CLUSTER_AUTO_001'), 'CLUSTER BY AUTO in DLT should flag');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_DLT_CLUSTER_AUTO_001')!.severity, 'info');
+    });
+
+    test('no CODE_DLT_CLUSTER_AUTO_001 for explicit CLUSTER BY keys in DLT file', () => {
+        const code = [
+            'CREATE OR REPLACE STREAMING LIVE TABLE my_table',
+            'CLUSTER BY (event_date, user_id)',
+            'AS SELECT * FROM STREAM(LIVE.source)',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_DLT_CLUSTER_AUTO_001'), 'explicit cluster keys should not flag');
+    });
+
+    test('no DLT checks fire in non-DLT file', () => {
+        const code = [
+            'df = spark.read.parquet("s3://bucket/data")',
+            'df.write.mode("overwrite").saveAsTable("my_table")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        const dltIds = ['CODE_DLT_PARTITION_001', 'CODE_DLT_SELECT_STAR_001', 'CODE_DLT_SCHEMA_HINTS_001', 'CODE_DLT_CDC_ORDER_001', 'CODE_DLT_CLUSTER_AUTO_001'];
+        const dltIssues = issues.filter(i => dltIds.includes(i.id));
+        assert.strictEqual(dltIssues.length, 0, 'no DLT checks should fire in a non-DLT file');
+    });
 });

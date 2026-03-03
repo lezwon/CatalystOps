@@ -2,7 +2,7 @@
   "name": "catalystops",
   "displayName": "CatalystOps - PySpark Optimizer",
   "description": "Analyze PySpark code for performance issues using Catalyst execution plan analysis",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "publisher": "CatalystOps",
   "repository": {
     "type": "git",
