@@ -22,10 +22,14 @@ import { createHoverProvider, createWriteSchemaHoverProvider } from './providers
 import { createCodeActionProvider } from './providers/codeActionProvider';
 import { IssuesTreeDataProvider } from './views/issuesTreeView';
 import { BillingTreeDataProvider } from './views/billingTreeView';
+import { ExplainTreeDataProvider, PlanNodeItem } from './views/explainTreeView';
+import { showDagWebview, disposeDagWebview } from './views/dagWebview';
 import { showBillingDashboard } from './commands/showBillingDashboard';
 import { Severity } from './models/types';
 import { startMcpServer, stopMcpServer } from './mcp/server';
 import { updateMcpSnapshot } from './mcp/mcpState';
+import { onCacheUpdated, getCachedResults, getCachedPlanIssues, getDataFrameLineMap } from './analysis/analysisCache';
+import { buildPlanTrees } from './analysis/planTreeBuilder';
 
 export function activate(context: vscode.ExtensionContext): void {
     initOutputChannel(context);
@@ -39,6 +43,21 @@ export function activate(context: vscode.ExtensionContext): void {
         // Issues tree view
         const issuesTreeProvider = new IssuesTreeDataProvider();
         vscode.window.registerTreeDataProvider('catalystops.issuesTree', issuesTreeProvider);
+
+        // Explain Plan tree view
+        const explainTreeProvider = new ExplainTreeDataProvider();
+        vscode.window.registerTreeDataProvider('catalystops.explainTree', explainTreeProvider);
+
+        // Refresh explain tree whenever the analysis cache updates (after dry run)
+        context.subscriptions.push(
+            onCacheUpdated(() => {
+                const activeDoc = vscode.window.activeTextEditor?.document;
+                const dfMap = activeDoc
+                    ? getDataFrameLineMap(activeDoc.uri.toString())
+                    : new Map<string, number>();
+                explainTreeProvider.update(getCachedResults(), getCachedPlanIssues(), dfMap);
+            }),
+        );
 
         // Billing tree view
         const billingTreeProvider = new BillingTreeDataProvider();
@@ -58,6 +77,115 @@ export function activate(context: vscode.ExtensionContext): void {
                 () => showBillingDashboard(context, billingTreeProvider)),
             vscode.commands.registerCommand('catalystops.refreshBilling',
                 () => showBillingDashboard(context, billingTreeProvider, undefined, undefined, true)),
+
+            // Explain Plan + DAG commands
+            vscode.commands.registerCommand('catalystops.showPlanDag', () => {
+                const activeDoc = vscode.window.activeTextEditor?.document;
+                const dfMap = activeDoc
+                    ? getDataFrameLineMap(activeDoc.uri.toString())
+                    : new Map<string, number>();
+                const nodes = buildPlanTrees(getCachedResults(), getCachedPlanIssues(), dfMap);
+                showDagWebview(context, nodes);
+            }),
+
+            vscode.commands.registerCommand('catalystops.jumpToLine', (sourceLine: number) => {
+                if (typeof sourceLine === 'number') {
+                    void vscode.commands.executeCommand('revealLine', {
+                        lineNumber: sourceLine,
+                        at: 'center',
+                    });
+                }
+            }),
+
+            // Quick fix commands (invoked via inline tree item buttons)
+            vscode.commands.registerCommand('catalystops.quickfix.broadcastHint', async (item: unknown) => {
+                const node = (item as PlanNodeItem)?.planNode;
+                const sourceLine = node?.sourceLine;
+                const editor = vscode.window.activeTextEditor;
+                if (!editor || sourceLine === undefined) { return; }
+                const line = editor.document.lineAt(sourceLine);
+                const newText = line.text.replace(/\.join\s*\((\s*\w+)(\s*,)/, '.join(broadcast($1)$2');
+                if (newText === line.text) {
+                    void vscode.window.showInformationMessage('CatalystOps: No join call found on this line.');
+                    return;
+                }
+                const edit = new vscode.WorkspaceEdit();
+                edit.replace(editor.document.uri, line.range, newText);
+                await vscode.workspace.applyEdit(edit);
+            }),
+
+            vscode.commands.registerCommand('catalystops.quickfix.repartition', async (item: unknown) => {
+                const node = (item as PlanNodeItem)?.planNode;
+                const sourceLine = node?.sourceLine;
+                const editor = vscode.window.activeTextEditor;
+                if (!editor || sourceLine === undefined) { return; }
+                const line = editor.document.lineAt(sourceLine);
+                // Insert .repartition(200) before .join( or .groupBy(
+                const newText = line.text.replace(
+                    /(\.\s*(?:join|groupBy)\s*\()/,
+                    '.repartition(200)$1',
+                );
+                if (newText === line.text) {
+                    void vscode.window.showInformationMessage('CatalystOps: No join/groupBy found on this line.');
+                    return;
+                }
+                const edit = new vscode.WorkspaceEdit();
+                edit.replace(editor.document.uri, line.range, newText);
+                await vscode.workspace.applyEdit(edit);
+            }),
+
+            vscode.commands.registerCommand('catalystops.quickfix.persist', async (item: unknown) => {
+                const node = (item as PlanNodeItem)?.planNode;
+                const dfName = node?.dataframeName;
+                const sourceLine = node?.sourceLine;
+                const editor = vscode.window.activeTextEditor;
+                if (!editor || !dfName || sourceLine === undefined) { return; }
+                // Insert dfName = dfName.persist() on the line after the assignment
+                const insertLine = sourceLine + 1;
+                const lineEnd = new vscode.Position(insertLine, 0);
+                const indent = editor.document.lineAt(sourceLine).text.match(/^(\s*)/)?.[1] ?? '';
+                const edit = new vscode.WorkspaceEdit();
+                edit.insert(editor.document.uri, lineEnd, `${indent}${dfName} = ${dfName}.persist()\n`);
+                await vscode.workspace.applyEdit(edit);
+            }),
+
+            vscode.commands.registerCommand('catalystops.quickfix.aqeConfig', async (item: unknown) => {
+                const editor = vscode.window.activeTextEditor;
+                if (!editor) { return; }
+                const edit = new vscode.WorkspaceEdit();
+                edit.insert(
+                    editor.document.uri,
+                    new vscode.Position(0, 0),
+                    'spark.conf.set("spark.sql.adaptive.enabled", "true")\n',
+                );
+                await vscode.workspace.applyEdit(edit);
+            }),
+
+            vscode.commands.registerCommand('catalystops.quickfix.addJoinCondition', async (item: unknown) => {
+                const node = (item as PlanNodeItem)?.planNode;
+                const sourceLine = node?.sourceLine;
+                const editor = vscode.window.activeTextEditor;
+                if (!editor || sourceLine === undefined) { return; }
+                const key = await vscode.window.showInputBox({
+                    prompt: 'Enter the join key column name',
+                    placeHolder: 'e.g. id',
+                });
+                if (!key) { return; }
+                const line = editor.document.lineAt(sourceLine);
+                const newText = line.text.replace(
+                    /\.crossJoin\s*\((\s*\w+)\s*\)/,
+                    `.join($1, "${key}")`,
+                );
+                if (newText === line.text) {
+                    void vscode.window.showInformationMessage('CatalystOps: No crossJoin found on this line.');
+                    return;
+                }
+                const edit = new vscode.WorkspaceEdit();
+                edit.replace(editor.document.uri, line.range, newText);
+                await vscode.workspace.applyEdit(edit);
+            }),
+
+            { dispose: () => { disposeDagWebview(); } },
         );
 
         // Start MCP server (in-process, Streamable HTTP on a dynamic port)

@@ -18,6 +18,8 @@ export interface LineCostEntry {
 let cachedResults: AnalysisResult[] = [];
 let cachedPlanIssues: PlanIssue[] = [];
 let lineCostMap = new Map<string, Map<number, LineCostEntry>>();
+/** Maps documentUri → (dataframeName → 0-based source line) */
+let dfLineMap = new Map<string, Map<string, number>>();
 
 const _onCacheUpdated = new vscode.EventEmitter<void>();
 
@@ -60,6 +62,22 @@ export function updateCache(
     }
 
     lineCostMap.set(docKey, lineMap);
+
+    // Build dfLineMap: dataframeName → 0-based source line
+    const newDfMap = new Map<string, number>();
+    for (const result of results) {
+        if (!result.dataframeName) { continue; }
+        const name = result.dataframeName;
+        const pattern = new RegExp(`\\b${escapeRegex(name)}\\s*=`);
+        for (let i = 0; i < lines.length; i++) {
+            if (pattern.test(lines[i])) {
+                newDfMap.set(name, i);
+                break;
+            }
+        }
+    }
+    dfLineMap.set(docKey, newDfMap);
+
     _onCacheUpdated.fire();
 }
 
@@ -87,9 +105,19 @@ export function getCachedPlanIssues(): PlanIssue[] {
     return cachedPlanIssues;
 }
 
+/** Get the DataFrame name → source line map for a document */
+export function getDataFrameLineMap(documentUri: string): Map<string, number> {
+    return dfLineMap.get(documentUri) ?? new Map();
+}
+
 /** Clear cache for a document */
 export function clearCache(documentUri: string): void {
     lineCostMap.delete(documentUri);
+    dfLineMap.delete(documentUri);
+}
+
+function escapeRegex(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
