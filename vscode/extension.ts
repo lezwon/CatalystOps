@@ -11,7 +11,7 @@ import { estimateStaticCost } from './analysis/staticCostEstimator';
 import { analyzeWriteOps } from './analysis/schemaTracker';
 import { createDiagnosticCollection, setCodeIssueDiagnostics, clearDiagnostics } from './providers/diagnosticsProvider';
 import { createStatusBar, setIdle, setAnalyzing, setResults, setError } from './views/statusBar';
-import { analyzeCost, showGeneratedScript, previewDryRunScript } from './commands/analyzeCost';
+import { analyzeCost, showGeneratedScript, previewDryRunScript, previewFullDryRunScript, showFullDryRunScript } from './commands/analyzeCost';
 import { initOutputChannel, logDebug, logError } from './logger';
 import { initTelemetry, sendEvent, maybeShowFeedbackToast, maybeShowDryRunNudge } from './telemetry';
 import { analyzeSelection } from './commands/analyzeSelection';
@@ -73,6 +73,8 @@ export function activate(context: vscode.ExtensionContext): void {
             vscode.commands.registerCommand('catalystops.configureConnection', () => configureConnection()),
             vscode.commands.registerCommand('catalystops.showGeneratedScript', () => showGeneratedScript()),
             vscode.commands.registerCommand('catalystops.previewDryRunScript', () => previewDryRunScript()),
+            vscode.commands.registerCommand('catalystops.previewFullDryRunScript', () => previewFullDryRunScript()),
+            vscode.commands.registerCommand('catalystops.showFullDryRunScript', () => showFullDryRunScript()),
             vscode.commands.registerCommand('catalystops.showBillingDashboard',
                 () => showBillingDashboard(context, billingTreeProvider)),
             vscode.commands.registerCommand('catalystops.refreshBilling',

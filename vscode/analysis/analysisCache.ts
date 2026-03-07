@@ -22,9 +22,18 @@ let lineCostMap = new Map<string, Map<number, LineCostEntry>>();
 let dfLineMap = new Map<string, Map<string, number>>();
 
 const _onCacheUpdated = new vscode.EventEmitter<void>();
+const _onDryRunError = new vscode.EventEmitter<string>();
 
 /** Event that fires when the analysis cache is updated */
 export const onCacheUpdated: vscode.Event<void> = _onCacheUpdated.event;
+
+/** Event that fires when a dry run fails — carries the human-readable error message */
+export const onDryRunError: vscode.Event<string> = _onDryRunError.event;
+
+/** Fire from any dry-run error path so MCP listeners can unblock immediately */
+export function fireDryRunError(message: string): void {
+    _onDryRunError.fire(message);
+}
 
 /**
  * Update the cache with new analysis results and plan issues.

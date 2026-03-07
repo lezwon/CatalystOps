@@ -138,6 +138,110 @@ function stripFStringPrefix(expr: string): string {
 const KEYWORD_RE = /^(if|elif|while|for|return|assert|raise|yield|with|not|and|or|in|is|lambda)\b/;
 
 /**
+ * Scan `text` forward, tracking string context and bracket depth, and return
+ * the position right after the last top-level separator (`,` or opening bracket)
+ * at the final depth level. This identifies where the innermost complete
+ * expression at the end of `text` begins.
+ *
+ * Example: findInnermostExprStart('print("x", df')
+ *   → position right after the ',' → 'df' is the innermost expression
+ */
+function findInnermostExprStart(text: string): number {
+    const lastSepAtDepth = new Map<number, number>();
+    let depth = 0;
+    let inSingle = false;
+    let inDouble = false;
+    let escaped = false;
+
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (escaped) { escaped = false; continue; }
+        if (ch === '\\' && (inSingle || inDouble)) { escaped = true; continue; }
+        if (ch === '"' && !inSingle) { inDouble = !inDouble; continue; }
+        if (ch === "'" && !inDouble) { inSingle = !inSingle; continue; }
+        if (inSingle || inDouble) { continue; }
+
+        if (ch === '(' || ch === '[' || ch === '{') {
+            depth++;
+            lastSepAtDepth.set(depth, i + 1); // entering a new scope — record its open
+        } else if (ch === ')' || ch === ']' || ch === '}') {
+            lastSepAtDepth.delete(depth);
+            depth--;
+        } else if (ch === ',') {
+            lastSepAtDepth.set(depth, i + 1); // comma at current depth
+        }
+    }
+
+    return lastSepAtDepth.get(depth) ?? 0;
+}
+
+/**
+ * Splice `_catalystops_capture(innerDf)` inline to replace only the dangerous
+ * method call within an outer function call.
+ *
+ * Example:
+ *   print("text", len(store), df.count())
+ *   → print("text", len(store), _catalystops_capture(df))
+ *
+ * `methodStart` is the index of the dangerous method in `trimmed`.
+ * `matchLen` is the length of the method match (which includes the opening '(').
+ * Returns null if the innermost df expression cannot be identified.
+ */
+function spliceInlineCapture(
+    trimmed: string,
+    methodStart: number,
+    matchLen: number,
+    indent: string,
+): string | null {
+    const dfExprText = trimmed.substring(0, methodStart);
+    const innerDfStart = findInnermostExprStart(dfExprText);
+    const innerDf = dfExprText.substring(innerDfStart).trim();
+    if (!innerDf) { return null; }
+
+    // Find the end of the dangerous call by scanning forward for the matching ')'.
+    // matchLen includes the opening '(' (verified by caller).
+    let depth = 1;
+    let pos = methodStart + matchLen;
+    let inSingle = false;
+    let inDouble = false;
+    let escaped = false;
+    while (pos < trimmed.length && depth > 0) {
+        const ch = trimmed[pos];
+        if (escaped) { escaped = false; pos++; continue; }
+        if (ch === '\\' && (inSingle || inDouble)) { escaped = true; pos++; continue; }
+        if (ch === '"' && !inSingle) { inDouble = !inDouble; pos++; continue; }
+        if (ch === "'" && !inDouble) { inSingle = !inSingle; pos++; continue; }
+        if (!inSingle && !inDouble) {
+            if (ch === '(') { depth++; }
+            else if (ch === ')') { depth--; }
+        }
+        pos++;
+    }
+
+    const prefix = dfExprText.substring(0, innerDfStart);
+    const suffix = trimmed.substring(pos);
+
+    return `${indent}${prefix}_catalystops_capture(${innerDf})${suffix}`;
+}
+
+/**
+ * Detect if dfExpr is in a dict value position: `"key": actual_expr` or `key: actual_expr`.
+ * Returns `{ prefix, actualExpr }` if matched, or null otherwise.
+ *
+ * Handles string keys ("a", 'a') and bareword/numeric keys (view, 0, etc.).
+ * Does NOT match f-string interpolation braces or slice colons (those patterns
+ * don't appear at the START of dfExpr because dfExpr is already stripped to the
+ * portion to the left of the dangerous method).
+ */
+function detectDictValuePosition(dfExpr: string): { prefix: string; actualExpr: string } | null {
+    const m = /^(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\w+)\s*:\s*/.exec(dfExpr);
+    if (!m) { return null; }
+    const actualExpr = dfExpr.substring(m[0].length).trim();
+    if (!actualExpr) { return null; }
+    return { prefix: dfExpr.substring(0, m[0].length), actualExpr };
+}
+
+/**
  * Find the index of a simple assignment `=` in an expression string, skipping
  * compound operators (==, !=, <=, >=, :=, +=, -=, *=, /=, **=, //=, etc.).
  * Returns -1 if no assignment operator is found.
@@ -169,13 +273,16 @@ function tryReplaceWithExplain(line: string): string | null | undefined {
     const trimmed = line.trim();
     const indent = line.substring(0, line.length - line.trimStart().length);
 
+    // Trailing comma: dict entries and function args end with ','; preserve it.
+    const trailingComma = trimmed.endsWith(',') ? ',' : '';
+
     // display(df) → _catalystops_capture(df)
     const displayMatch = DISPLAY_RE.exec(trimmed);
     if (displayMatch !== null) {
         const afterOpen = trimmed.indexOf('(', displayMatch.index) + 1;
         const arg = extractFirstArg(trimmed.substring(afterOpen));
         if (arg) {
-            return `${indent}_catalystops_capture(${arg})`;
+            return `${indent}_catalystops_capture(${arg})${trailingComma}`;
         }
     }
 
@@ -195,6 +302,19 @@ function tryReplaceWithExplain(line: string): string | null | undefined {
         if (!dfExpr) {
             return undefined;
         }
+        // If dfExpr has unmatched open parens the dangerous call is an argument
+        // inside an outer function call (e.g. print(..., df.count())).
+        // For method patterns that include '(' we can splice _catalystops_capture
+        // inline so the outer call survives but the dangerous action is neutralized.
+        if (parenBalance(dfExpr) > 0) {
+            if (m[0][m[0].length - 1] === '(') {
+                const spliced = spliceInlineCapture(trimmed, m.index, m[0].length, indent);
+                if (spliced !== null) { return spliced; }
+            }
+            // Fallback (e.g. .write / .writeStream embedded in an outer call):
+            // comment the line out so the dangerous action cannot execute.
+            return undefined;
+        }
         // If the extracted expression starts with a Python keyword the dangerous
         // call is embedded in a condition/loop (e.g. "if orders.count() > 0:").
         // Keep the line as-is rather than emitting invalid syntax.
@@ -207,9 +327,15 @@ function tryReplaceWithExplain(line: string): string | null | undefined {
         if (assignIdx !== -1) {
             const lhs = dfExpr.substring(0, assignIdx).trimEnd();
             const rhs = dfExpr.substring(assignIdx + 1).trimStart();
-            return `${indent}${lhs} = _catalystops_capture(${rhs})`;
+            return `${indent}${lhs} = _catalystops_capture(${rhs})${trailingComma}`;
         }
-        return `${indent}_catalystops_capture(${dfExpr})`;
+        // If dfExpr is a dict value position ("key": expr or key: expr), wrap only
+        // the value part so the replacement remains valid Python inside a dict literal.
+        const dictPos = detectDictValuePosition(dfExpr);
+        if (dictPos) {
+            return `${indent}${dictPos.prefix}_catalystops_capture(${dictPos.actualExpr})${trailingComma}`;
+        }
+        return `${indent}_catalystops_capture(${dfExpr})${trailingComma}`;
     }
 
     return undefined;
@@ -246,6 +372,13 @@ function tryReplaceWithExplain(line: string): string | null | undefined {
 /** Databricks notebook cell separator and header patterns to strip before processing. */
 const NOTEBOOK_SEPARATOR_RE = /^#\s*COMMAND\s*-{5,}\s*$|^#\s*Databricks notebook source\s*$/;
 
+/**
+ * Cell-type magics whose body (lines after the magic line) is non-Python content.
+ * These put the rest of the cell into a different language/runtime.
+ * Single-line magics like %pip, %run, %fs are NOT listed here — they have no body.
+ */
+const CELL_BODY_MAGICS = new Set(['sh', 'bash', 'sql', 'scala', 'r', 'md']);
+
 export function neutralizeCode(code: string): string {
     const lines = code.split('\n');
     const result: string[] = [];
@@ -253,13 +386,61 @@ export function neutralizeCode(code: string): string {
     let depth = 0;
     let droppingChain = false; // chain mode: drop .method() continuations
     let chainDepth = 0;        // paren depth within current chain segment
+    let inMagicCell = false;   // true while inside a non-Python magic cell body
 
     for (const line of lines) {
-        // Strip Databricks notebook cell separators and header comments.
-        // These lines are valid Python comments but Databricks uses them to split
-        // notebooks into cells — if left in the generated script they cause the
-        // dry-run to fail with "SyntaxError: incomplete input" on subsequent cells.
-        if (NOTEBOOK_SEPARATOR_RE.test(line.trim())) { continue; }
+        // Cell separator: reset magic-cell state so the next cell is processed fresh.
+        if (NOTEBOOK_SEPARATOR_RE.test(line.trim())) {
+            inMagicCell = false;
+            continue;
+        }
+
+        const trimmed = line.trim();
+
+        // Databricks notebook source format prefixes magic-command lines with
+        // "# MAGIC " (a Python comment). When the script is uploaded via the
+        // Workspace Import API with format=SOURCE/language=PYTHON, Databricks strips
+        // the "# MAGIC " prefix from every matching line *before* Python parses the
+        // file — even inside triple-quoted exec() strings — turning
+        // "# MAGIC %sh" into bare "%sh" and crashing with SyntaxError.
+        // Normalise these lines here so the raw magic is never sent to Databricks.
+        const MAGIC_PREFIX_RE = /^#\s*MAGIC\s+/i;
+        const isMagicPrefixed = MAGIC_PREFIX_RE.test(trimmed);
+        const effective = isMagicPrefixed ? trimmed.replace(MAGIC_PREFIX_RE, '') : trimmed;
+
+        // Inside a non-Python magic cell body: drop content lines.
+        // A new % magic line (raw or # MAGIC-prefixed) starts a fresh cell context.
+        if (inMagicCell) {
+            if (!effective.startsWith('%')) { continue; }
+            inMagicCell = false; // new magic — fall through to handle it
+        }
+
+        // Magic commands: %sh, %sql, %md, %pip, %run, %fs, %python, etc.
+        // Covers raw `%sh` lines and Databricks-export `# MAGIC %sh` lines.
+        if (effective.startsWith('%')) {
+            const magicName = /^%(\w+)/.exec(effective)?.[1]?.toLowerCase() ?? '';
+            if (magicName === 'python') {
+                // %python just marks the cell as Python — skip the line, keep content.
+                continue;
+            }
+            result.push(`# [CatalystOps: skipped] ${trimmed}`);
+            // Cell-body magics with no inline args: drop following non-Python lines.
+            const hasInlineArgs = effective.slice(magicName.length + 1).trim().length > 0;
+            if (CELL_BODY_MAGICS.has(magicName) && !hasInlineArgs) {
+                inMagicCell = true;
+            }
+            continue;
+        }
+
+        // Shell escapes: `!cmd` (raw) or `# MAGIC !cmd` (Databricks export).
+        if (effective.startsWith('!')) {
+            result.push(`# [CatalystOps: skipped] ${trimmed}`);
+            continue;
+        }
+
+        // Remaining # MAGIC lines (non-% non-! body content already in inMagicCell,
+        // or unreachable metadata) — skip rather than let Databricks strip the prefix.
+        if (isMagicPrefixed) { continue; }
 
         const bal = parenBalance(line);
 
@@ -276,10 +457,27 @@ export function neutralizeCode(code: string): string {
                 chainDepth += bal;
                 // line consumed — not pushed
             } else {
-                // First non-continuation line — stop dropping and keep it
+                // First non-continuation line — stop dropping.
+                // Re-check for danger: e.g. the next dict entry may also be dangerous.
                 droppingChain = false;
                 chainDepth = 0;
-                result.push(line);
+                if (isDangerousLine(line)) {
+                    const rep = tryReplaceWithExplain(line);
+                    if (rep === null) {
+                        result.push(line);
+                    } else {
+                        result.push(rep ?? `# [CatalystOps: neutralized] ${line.trimStart()}`);
+                        if (bal > 0) {
+                            depth = bal;
+                            dropping = true;
+                        } else {
+                            droppingChain = true;
+                            chainDepth = 0;
+                        }
+                    }
+                } else {
+                    result.push(line);
+                }
             }
         } else {
             if (isDangerousLine(line)) {

@@ -58,6 +58,14 @@
         "title": "CatalystOps: Preview Dry-Run Script"
       },
       {
+        "command": "catalystops.previewFullDryRunScript",
+        "title": "CatalystOps: Preview Full Dry-Run Script (with wrapper)"
+      },
+      {
+        "command": "catalystops.showFullDryRunScript",
+        "title": "CatalystOps: Show Full Script from Last Dry Run"
+      },
+      {
         "command": "catalystops.showBillingDashboard",
         "title": "CatalystOps: Show Billing Dashboard",
         "icon": "$(graph)"

@@ -140,6 +140,170 @@ suite('Safety Wrapper', () => {
         assert.ok(result.includes('_catalystops_capture('), 'should call _catalystops_capture');
     });
 
+    // --- Dict value positions ---
+
+    test('should neutralize .count() inside a dict value', () => {
+        const code = [
+            'metrics = {',
+            '    "a": df[df.eventtype == "view"].et.count(),',
+            '    "b": df[df.eventtype == "cart"].et.count(),',
+            '}',
+        ].join('\n');
+        const result = neutralizeCode(code);
+        assert.ok(!result.includes('.count()'), '.count() should be replaced');
+        assert.ok(result.includes('"a": _catalystops_capture('), 'dict key "a" should be preserved');
+        assert.ok(result.includes('"b": _catalystops_capture('), 'dict key "b" should be preserved');
+        assert.ok(result.includes('}'), 'closing brace should be kept');
+    });
+
+    test('should preserve trailing comma on dict entry replacement', () => {
+        const result = neutralizeCode('    "a": df.count(),');
+        assert.ok(result.includes('"a": _catalystops_capture(df),'), 'trailing comma should be preserved');
+    });
+
+    test('should neutralize .collect() inside a dict value', () => {
+        const result = neutralizeCode('    view: df.filter("x > 0").collect(),');
+        assert.ok(!result.includes('.collect()'), 'collect() should be replaced');
+        assert.ok(result.includes('view: _catalystops_capture('), 'bareword dict key should be preserved');
+        assert.ok(result.includes(','), 'trailing comma should be preserved');
+    });
+
+    // --- Dangerous call embedded as argument to another function ---
+
+    test('should splice capture inline when .count() is inside print()', () => {
+        const line = 'print("this is ", hash["key"] + "the end ", id_, " is ", len(store), df.count())';
+        const result = neutralizeCode(line);
+        assert.ok(!result.includes('.count()'), '.count() should not execute');
+        assert.ok(result.includes('_catalystops_capture(df)'), 'df should be captured');
+        assert.ok(result.startsWith('print('), 'outer print() call should be preserved');
+    });
+
+    test('should splice capture inline when .collect() is an arg to an outer call', () => {
+        const line = 'process(df.filter("x > 0").collect(), other_arg)';
+        const result = neutralizeCode(line);
+        assert.ok(!result.includes('.collect()'), '.collect() should not execute');
+        assert.ok(result.includes('_catalystops_capture(df.filter("x > 0"))'), 'df expr should be captured');
+        assert.ok(result.includes('other_arg'), 'remaining args should be preserved');
+    });
+
+    test('should handle strings with parens inside outer call correctly', () => {
+        const line = 'print("(nested parens)", df.count())';
+        const result = neutralizeCode(line);
+        assert.ok(!result.includes('.count()'), '.count() should not execute');
+        assert.ok(result.includes('_catalystops_capture(df)'), 'df should be captured');
+        assert.ok(result.includes('"(nested parens)"'), 'string with parens should be preserved');
+    });
+
+    test('should comment out line when .write is embedded in an outer call (no paren in pattern)', () => {
+        const line = 'func(df.write.saveAsTable("t"))';
+        const result = neutralizeCode(line);
+        // Line is commented out (text preserved in comment, but inactive)
+        assert.ok(result.trimStart().startsWith('#'), 'line should be commented out');
+        assert.ok(result.includes('[CatalystOps: neutralized]'), 'should carry neutralized marker');
+    });
+
+    // --- Magic commands and shell escapes ---
+
+    test('should comment out %sh magic line', () => {
+        const result = neutralizeCode('%sh echo hello');
+        assert.ok(result.trimStart().startsWith('#'), '%sh should be commented out');
+        assert.ok(!result.includes('echo hello\n') || result.includes('# '), 'shell content should not be live Python');
+    });
+
+    test('should comment out %sql magic line', () => {
+        const result = neutralizeCode('%sql SELECT * FROM table');
+        assert.ok(result.trimStart().startsWith('#'), '%sql should be commented out');
+    });
+
+    test('should comment out %pip magic line', () => {
+        const result = neutralizeCode('%pip install pandas');
+        assert.ok(result.trimStart().startsWith('#'), '%pip should be commented out');
+    });
+
+    test('should skip %python magic line but keep following Python code', () => {
+        const code = '%python\ndf = spark.read.parquet("path")';
+        const result = neutralizeCode(code);
+        assert.ok(!result.includes('%python'), '%python magic line should be removed');
+        assert.ok(result.includes('df = spark.read.parquet'), 'Python code after %python should be kept');
+    });
+
+    test('should drop body of multi-line %sh cell until next separator', () => {
+        const code = [
+            'df = spark.read.parquet("path")',
+            '%sh',
+            'echo hello',
+            'ls /tmp',
+            '# COMMAND ----------',
+            'df.count()',
+        ].join('\n');
+        const result = neutralizeCode(code);
+        assert.ok(result.includes('df = spark.read.parquet'), 'Python code before %sh kept');
+        assert.ok(!result.includes('echo hello'), 'shell body line should be dropped');
+        assert.ok(!result.includes('ls /tmp'), 'shell body line should be dropped');
+        assert.ok(result.includes('_catalystops_capture(df)'), 'Python code after separator kept and neutralized');
+    });
+
+    test('should comment out any line starting with !', () => {
+        const cases = ['!ls -la', '!pip install numpy', '!echo hello'];
+        for (const line of cases) {
+            const result = neutralizeCode(line);
+            assert.ok(result.trimStart().startsWith('#'), `"${line}" should be commented out`);
+        }
+    });
+
+    test('should neutralize # MAGIC %sh (Databricks strips prefix before execution)', () => {
+        const result = neutralizeCode('# MAGIC %sh echo hello');
+        // Must not start with "# MAGIC" — that prefix would be stripped by Databricks, exposing %sh
+        assert.ok(!result.trimStart().startsWith('# MAGIC'), 'line must not retain # MAGIC prefix');
+        assert.ok(result.includes('[CatalystOps: skipped]'), 'line should be marked as skipped');
+    });
+
+    test('should drop body of # MAGIC %sh cell until next separator', () => {
+        const code = [
+            '# MAGIC %sh',
+            '# MAGIC echo hello',
+            '# MAGIC ls /tmp',
+            '# COMMAND ----------',
+            'df = spark.read.parquet("path")',
+        ].join('\n');
+        const result = neutralizeCode(code);
+        assert.ok(!result.includes('echo hello'), 'shell body should be dropped');
+        assert.ok(!result.includes('ls /tmp'), 'shell body should be dropped');
+        assert.ok(result.includes('df = spark.read.parquet'), 'Python after separator kept');
+    });
+
+    test('should neutralize # MAGIC %sql cell', () => {
+        const code = [
+            '# MAGIC %sql',
+            '# MAGIC SELECT * FROM table',
+            '# COMMAND ----------',
+            'df = spark.read.parquet("path")',
+        ].join('\n');
+        const result = neutralizeCode(code);
+        assert.ok(!result.includes('SELECT'), 'SQL body should be dropped');
+        assert.ok(result.includes('df = spark.read.parquet'), 'Python after separator kept');
+    });
+
+    test('should neutralize # MAGIC !cmd', () => {
+        const result = neutralizeCode('# MAGIC !pip install pandas');
+        assert.ok(!result.trimStart().startsWith('# MAGIC'), 'line must not retain # MAGIC prefix');
+        assert.ok(result.includes('[CatalystOps: skipped]'), 'line should be marked as skipped');
+    });
+
+    test('should handle mixed magic and Python cells', () => {
+        const code = [
+            'a = 1',
+            '# COMMAND ----------',
+            '%sql SELECT 1',
+            '# COMMAND ----------',
+            'b = 2',
+        ].join('\n');
+        const result = neutralizeCode(code);
+        assert.ok(result.includes('a = 1'), 'first Python cell kept');
+        assert.ok(result.includes('b = 2'), 'last Python cell kept');
+        assert.ok(!result.includes('SELECT 1') || result.includes('# '), 'SQL magic commented out');
+    });
+
     // --- Comments are not affected ---
 
     test('should not neutralize actions inside comments', () => {

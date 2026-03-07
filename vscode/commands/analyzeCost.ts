@@ -23,7 +23,7 @@ import { generateClusterScript, extractResult } from '../analysis/clusterScript'
 import { analyzeCode } from '../analysis/codeAnalyzer';
 import { parsePlanFromResults } from '../analysis/planParser';
 import { mapResultsToDiagnostics, mapPlanIssuesToDiagnostics } from '../analysis/resultMapper';
-import { updateCache } from '../analysis/analysisCache';
+import { updateCache, fireDryRunError } from '../analysis/analysisCache';
 import { estimateDollarCost, estimateDollarCostFromDuration, estimateDollarCostFromTableStats, costLabel } from '../analysis/costModel';
 import { setCodeIssueDiagnostics } from '../providers/diagnosticsProvider';
 import { setAnalyzing, setResults, setError, setIdle } from '../views/statusBar';
@@ -37,6 +37,8 @@ let lastAnalysisResult: AnalysisResult[] | undefined;
 let lastRawOutput: string | undefined;
 /** The processed user Python code (bundled deps + neutralized user code) */
 let lastProcessedUserCode: string | undefined;
+/** The full cluster script including CatalystOps wrapper boilerplate */
+let lastScript: string | undefined;
 
 export function getLastAnalysisResult(): AnalysisResult[] | undefined {
     return lastAnalysisResult;
@@ -62,9 +64,8 @@ export async function showGeneratedScript(): Promise<void> {
 }
 
 /**
- * Generate and preview the full script that would be sent to Databricks,
- * without executing it. Useful for inspecting neutralization and bundling
- * before committing to a dry run.
+ * Generate and preview the neutralized user code that would be sent to Databricks,
+ * without executing it. Shows only user code — no CatalystOps wrapper boilerplate.
  */
 export async function previewDryRunScript(): Promise<void> {
     const editor = vscode.window.activeTextEditor;
@@ -79,6 +80,41 @@ export async function previewDryRunScript(): Promise<void> {
 
     const tmpPath = path.join(os.tmpdir(), 'catalystops_dryrun_preview.py');
     fs.writeFileSync(tmpPath, processedUserCode, 'utf-8');
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(tmpPath));
+    await vscode.window.showTextDocument(doc, { preview: true });
+}
+
+/**
+ * Generate and preview the complete cluster script (user code + CatalystOps wrapper)
+ * that would be sent to Databricks, without executing it.
+ */
+export async function previewFullDryRunScript(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== 'python') {
+        vscode.window.showWarningMessage('CatalystOps: Open a Python file to preview the script.');
+        return;
+    }
+
+    const code = editor.document.getText();
+    const sourceDir = path.dirname(editor.document.uri.fsPath);
+    const { script } = generateClusterScript(code, sourceDir);
+
+    const tmpPath = path.join(os.tmpdir(), 'catalystops_full_preview.py');
+    fs.writeFileSync(tmpPath, script, 'utf-8');
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(tmpPath));
+    await vscode.window.showTextDocument(doc, { preview: true });
+}
+
+/**
+ * Open the full cluster script from the most recent dry run (user code + wrapper).
+ */
+export async function showFullDryRunScript(): Promise<void> {
+    if (!lastScript) {
+        vscode.window.showWarningMessage('CatalystOps: No script generated yet. Run a dry-run analysis first.');
+        return;
+    }
+    const tmpPath = path.join(os.tmpdir(), 'catalystops_last_full.py');
+    fs.writeFileSync(tmpPath, lastScript, 'utf-8');
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(tmpPath));
     await vscode.window.showTextDocument(doc, { preview: true });
 }
@@ -181,9 +217,9 @@ export async function analyzeCost(
                 finishStep('error', availability.reason);
                 log(`Serverless not available: ${availability.reason}`);
                 sendEvent('dry_run/serverless_unavailable', { reason: availability.reason ?? 'unknown' });
-                vscode.window.showErrorMessage(
-                    `CatalystOps: ${availability.reason ?? 'Serverless compute not available on this workspace. Databricks Premium tier is required.'}`,
-                );
+                const unavailMsg = availability.reason ?? 'Serverless compute not available on this workspace. Databricks Premium tier is required.';
+                fireDryRunError(unavailMsg);
+                vscode.window.showErrorMessage(`CatalystOps: ${unavailMsg}`);
                 setCodeIssueDiagnostics(editor.document.uri, localIssues);
                 issuesTreeProvider.updateFromCodeIssues(localIssues);
                 updateStatusBar(localIssues);
@@ -196,6 +232,7 @@ export async function analyzeCost(
             const sourceDir = path.dirname(editor.document.uri.fsPath);
             const { script, processedUserCode } = generateClusterScript(code, sourceDir);
             lastProcessedUserCode = processedUserCode;
+            lastScript = script;
             log(`Script generated (${script.length} chars)`);
             finishStep('done', `${(script.length / 1024).toFixed(1)} KB`);
 
@@ -235,6 +272,7 @@ export async function analyzeCost(
                 finishStep('error', 'timed out');
                 logError('Serverless job run timed out');
                 setError('Serverless job run timed out');
+                fireDryRunError('Serverless job run timed out');
                 sendEvent('dry_run/run_timeout', { executionMode: 'serverless' });
                 vscode.window.showErrorMessage(
                     'CatalystOps: Serverless job run timed out.',
@@ -254,6 +292,7 @@ export async function analyzeCost(
                 finishStep('error', 'run failed');
                 logError('Serverless job run failed');
                 setError('Serverless job run failed');
+                fireDryRunError('Serverless job run failed');
                 sendEvent('dry_run/run_failed', { executionMode: 'serverless' });
                 vscode.window.showErrorMessage(
                     'CatalystOps: Serverless job run failed.',
@@ -298,6 +337,7 @@ export async function analyzeCost(
             const sourceDir = path.dirname(editor.document.uri.fsPath);
             const { script, processedUserCode } = generateClusterScript(code, sourceDir);
             lastProcessedUserCode = processedUserCode;
+            lastScript = script;
             log(`Script generated (${script.length} chars)`);
             finishStep('done', `${(script.length / 1024).toFixed(1)} KB`);
 
@@ -310,6 +350,7 @@ export async function analyzeCost(
                 const errorMsg = result.results?.cause || result.results?.data || 'Unknown error';
                 logError(`Cluster execution failed: ${errorMsg}`);
                 setError(errorMsg.substring(0, 100));
+                fireDryRunError(`Cluster execution failed: ${errorMsg}`);
                 sendEvent('dry_run/cluster_execution_error', { error: errorMsg.substring(0, 200) });
                 vscode.window.showErrorMessage(`CatalystOps cluster analysis failed: ${errorMsg}`);
                 setCodeIssueDiagnostics(editor.document.uri, localIssues);
@@ -358,9 +399,10 @@ export async function analyzeCost(
             updateStatusBar(localIssues);
             log('No DataFrames found in output');
             const nodfMsg = actualErrors.length > 0
-                ? 'CatalystOps: No DataFrames found. Check the Output panel for details.'
-                : 'CatalystOps: No DataFrames found in script output.';
-            vscode.window.showErrorMessage(nodfMsg);
+                ? 'No DataFrames found. Check the Output panel for details.'
+                : 'No DataFrames found in script output.';
+            fireDryRunError(nodfMsg);
+            vscode.window.showErrorMessage(`CatalystOps: ${nodfMsg}`);
             setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
             return;
         }
@@ -476,6 +518,7 @@ export async function analyzeCost(
         const message = err instanceof Error ? err.message : String(err);
         logError(message);
         setError(message.substring(0, 100));
+        fireDryRunError(message);
         sendEvent('analysis/failed', {
             executionMode: config?.executionMode ?? 'unknown',
             error: message.substring(0, 200),

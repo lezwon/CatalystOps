@@ -14,7 +14,7 @@ import { analyzeCode } from '../analysis/codeAnalyzer';
 import { getMcpSnapshot } from './mcpState';
 import { loadFromCache, cacheKey } from '../billing/billingCache';
 import { computeSummary, dateRangeForPeriod } from '../billing/billingTypes';
-import { getCachedPlanIssues, getCachedResults, onCacheUpdated } from '../analysis/analysisCache';
+import { getCachedPlanIssues, getCachedResults, onCacheUpdated, onDryRunError } from '../analysis/analysisCache';
 import { logDebug, logError } from '../logger';
 import { Severity } from '../models/types';
 
@@ -34,18 +34,28 @@ function severityEmoji(sev: Severity): string {
 
 // ── Wait for the analysis cache to update ─────────────────────────────────────
 
-function waitForCacheUpdate(timeoutMs: number): Promise<boolean> {
-    return new Promise(resolve => {
-        const timer = setTimeout(() => {
-            disposable.dispose();
-            resolve(false);
-        }, timeoutMs);
+type CacheWaitResult =
+    | { ok: true }
+    | { ok: false; timedOut: true }
+    | { ok: false; error: string };
 
-        const disposable = onCacheUpdated(() => {
+function waitForCacheUpdate(timeoutMs: number): Promise<CacheWaitResult> {
+    return new Promise(resolve => {
+        let settled = false;
+
+        const finish = (result: CacheWaitResult) => {
+            if (settled) { return; }
+            settled = true;
             clearTimeout(timer);
-            disposable.dispose();
-            resolve(true);
-        });
+            successDisposable.dispose();
+            errorDisposable.dispose();
+            resolve(result);
+        };
+
+        const timer = setTimeout(() => finish({ ok: false, timedOut: true }), timeoutMs);
+
+        const successDisposable = onCacheUpdated(() => finish({ ok: true }));
+        const errorDisposable  = onDryRunError(msg => finish({ ok: false, error: msg }));
     });
 }
 
@@ -295,17 +305,21 @@ function createMcpServer(context: vscode.ExtensionContext): McpServer {
                 // Set up cache listener BEFORE triggering the run
                 const cachePromise = waitForCacheUpdate(5 * 60 * 1000);
                 await vscode.commands.executeCommand('catalystops.analyzeCost');
-                const updated = await cachePromise;
+                const result = await cachePromise;
 
-                if (!updated) {
-                    return {
-                        content: [
-                            {
+                if (!result.ok) {
+                    if ('timedOut' in result) {
+                        return {
+                            content: [{
                                 type: 'text' as const,
                                 text: 'Dry run triggered but timed out waiting for results. The run may still be in progress. ' +
                                     'Try calling get_plan_analysis after the run completes.',
-                            },
-                        ],
+                            }],
+                        };
+                    }
+                    return {
+                        isError: true,
+                        content: [{ type: 'text' as const, text: `Dry run failed: ${'error' in result ? result.error : 'unknown error'}` }],
                     };
                 }
 

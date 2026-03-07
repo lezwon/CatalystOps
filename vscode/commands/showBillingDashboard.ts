@@ -11,6 +11,9 @@ import { showBillingWebview, restoreBillingWebview } from '../views/billingWebvi
 import { getConnectionConfig } from '../config/settings';
 import { sendEvent } from '../telemetry';
 
+/** Whether the user has already confirmed the SQL warehouse billing notice this session. */
+let billingWarningAcknowledged = false;
+
 /**
  * Main entry point. Defaults to the last 7 days if no date range is supplied.
  * periodHint: the tab the user explicitly clicked — preserved in the summary so
@@ -53,14 +56,17 @@ export async function showBillingDashboard(
         let rows = forceRefresh ? null : await loadFromCache(context, key);
 
         if (!rows) {
-            const choice = await vscode.window.showInformationMessage(
-                'Fetching billing data will start your SQL warehouse compute if it is not already running.',
-                { modal: true },
-                'Proceed',
-            );
-            if (choice !== 'Proceed') {
-                treeProvider.setLoading(false);
-                return;
+            if (!billingWarningAcknowledged) {
+                const choice = await vscode.window.showInformationMessage(
+                    'Fetching billing data will start your SQL warehouse compute if it is not already running.',
+                    { modal: true },
+                    'Proceed',
+                );
+                if (choice !== 'Proceed') {
+                    treeProvider.setLoading(false);
+                    return;
+                }
+                billingWarningAcknowledged = true;
             }
             const fetchStart = Date.now();
             rows = await fetchBillingRows(config, startDate, endDate, context);
