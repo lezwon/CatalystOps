@@ -130,6 +130,8 @@ export async function analyzeCost(
 
     // Try cluster analysis
     const config = getConnectionConfig();
+    const timeoutSeconds = vscode.workspace.getConfiguration('catalystops').get<number>('dryRun.timeoutSeconds', 300);
+    const dryRunTimeoutMs = Math.max(timeoutSeconds, 30) * 1000;
     if (!config) {
         // No cluster config — just show local results
         setCodeIssueDiagnostics(editor.document.uri, localIssues);
@@ -225,7 +227,7 @@ export async function analyzeCost(
                 }
             });
 
-            const { outcome: runOutcome, runPageUrl } = await pollJobRun(config.host, config.token, runId, onPollProgress);
+            const { outcome: runOutcome, runPageUrl } = await pollJobRun(config.host, config.token, runId, onPollProgress, dryRunTimeoutMs);
             // Update URL if polling returned a fresher one
             if (runPageUrl) { serverlessRunPageUrl = runPageUrl; }
 
@@ -301,7 +303,7 @@ export async function analyzeCost(
 
             addStep('Running on cluster', 'running');
             log('Submitting script to cluster...');
-            const result = await executeCommand(config.host, config.token, config.clusterId!, script, onPollProgress);
+            const result = await executeCommand(config.host, config.token, config.clusterId!, script, onPollProgress, dryRunTimeoutMs);
 
             if (result.status === 'Error' || result.results?.resultType === 'error') {
                 finishStep('error');

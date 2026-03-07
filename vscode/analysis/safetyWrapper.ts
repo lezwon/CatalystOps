@@ -148,7 +148,7 @@ function findAssignmentIndex(expr: string): number {
         const prev = i > 0 ? expr[i - 1] : '';
         const next = i < expr.length - 1 ? expr[i + 1] : '';
         if (next === '=') { continue; }              // ==
-        if ('!<>:+-*/%|&^~'.includes(prev)) { continue; } // augmented / comparison
+        if ('!<>:+-*/%|&^~='.includes(prev)) { continue; } // augmented / comparison / second = of ==
         return i;
     }
     return -1;
@@ -243,6 +243,9 @@ function tryReplaceWithExplain(line: string): string | null | undefined {
  *       .start()       ← starts with '.', dropped
  *   )                  ← no '.', chainDepth=0 → stop, kept ✓
  */
+/** Databricks notebook cell separator and header patterns to strip before processing. */
+const NOTEBOOK_SEPARATOR_RE = /^#\s*COMMAND\s*-{5,}\s*$|^#\s*Databricks notebook source\s*$/;
+
 export function neutralizeCode(code: string): string {
     const lines = code.split('\n');
     const result: string[] = [];
@@ -252,6 +255,12 @@ export function neutralizeCode(code: string): string {
     let chainDepth = 0;        // paren depth within current chain segment
 
     for (const line of lines) {
+        // Strip Databricks notebook cell separators and header comments.
+        // These lines are valid Python comments but Databricks uses them to split
+        // notebooks into cells — if left in the generated script they cause the
+        // dry-run to fail with "SyntaxError: incomplete input" on subsequent cells.
+        if (NOTEBOOK_SEPARATOR_RE.test(line.trim())) { continue; }
+
         const bal = parenBalance(line);
 
         if (dropping) {

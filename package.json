@@ -183,6 +183,17 @@
           "type": "boolean",
           "default": false,
           "description": "Enable debug logging (logs equivalent curl commands for every Databricks API call to the Output panel)"
+        },
+        "catalystops.mcp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the CatalystOps MCP server for integration with Claude, Copilot, and other MCP clients. Restart VS Code after changing."
+        },
+        "catalystops.dryRun.timeoutSeconds": {
+          "type": "number",
+          "default": 300,
+          "minimum": 30,
+          "description": "Maximum time in seconds to wait for a dry-run job to complete before cancelling. Applies to both cluster and serverless execution modes."
         }
       }
     },

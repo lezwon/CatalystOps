@@ -19,7 +19,6 @@ import { logDebug, logError } from '../logger';
 import { Severity } from '../models/types';
 
 let _httpServer: http.Server | undefined;
-let _mcpServer: McpServer | undefined;
 
 // ── Severity emoji helpers ─────────────────────────────────────────────────────
 
@@ -649,15 +648,47 @@ function createMcpServer(context: vscode.ExtensionContext): McpServer {
 // ── Start / stop the HTTP server ───────────────────────────────────────────────
 
 export async function startMcpServer(context: vscode.ExtensionContext): Promise<number> {
-    _mcpServer = createMcpServer(context);
-
-    const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined, // stateless — simpler for single-user VS Code
-    });
+    // _mcpServer is not kept globally — a new McpServer+transport is created per request
+    // in stateless mode (sessionIdGenerator: undefined), per the MCP SDK requirement.
 
     _httpServer = http.createServer(async (req, res) => {
-        if (req.url === '/mcp') {
-            // Buffer the body for POST requests
+        // CORS headers — required for some MCP clients (Copilot, Inspector, etc.)
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept, Mcp-Session-Id');
+
+        // Preflight
+        if (req.method === 'OPTIONS') {
+            res.writeHead(204);
+            res.end();
+            return;
+        }
+
+        if (req.url !== '/mcp') {
+            res.writeHead(404);
+            res.end();
+            return;
+        }
+
+        logDebug(`MCP request: ${req.method} from ${req.headers['user-agent'] ?? 'unknown'}`);
+
+        // GET — SSE notifications (stateless mode doesn't support persistent sessions)
+        if (req.method === 'GET') {
+            res.writeHead(405, { Allow: 'POST' });
+            res.end(JSON.stringify({ error: 'Use POST for stateless MCP requests' }));
+            return;
+        }
+
+        // DELETE — session termination (no-op in stateless mode)
+        if (req.method === 'DELETE') {
+            res.writeHead(200);
+            res.end();
+            return;
+        }
+
+        // POST — JSON-RPC. Create a fresh server+transport per request (stateless mode
+        // requirement: reusing the same transport across requests corrupts its state).
+        if (req.method === 'POST') {
             const chunks: Buffer[] = [];
             req.on('data', (chunk: Buffer) => chunks.push(chunk));
             req.on('end', async () => {
@@ -671,7 +702,16 @@ export async function startMcpServer(context: vscode.ExtensionContext): Promise<
                         return;
                     }
                 }
+                const transport = new StreamableHTTPServerTransport({
+                    sessionIdGenerator: undefined,
+                });
+                const server = createMcpServer(context);
+                res.on('close', () => {
+                    void transport.close();
+                    void server.close();
+                });
                 try {
+                    await server.connect(transport);
                     await transport.handleRequest(req as any, res as any, body);
                 } catch (err) {
                     logError(`MCP request error: ${err instanceof Error ? err.message : String(err)}`);
@@ -681,30 +721,59 @@ export async function startMcpServer(context: vscode.ExtensionContext): Promise<
                     }
                 }
             });
-        } else {
-            res.writeHead(404);
-            res.end();
+            return;
         }
-    });
 
-    await _mcpServer.connect(transport);
+        res.writeHead(405, { Allow: 'POST, GET, DELETE, OPTIONS' });
+        res.end();
+    });
 
     return new Promise((resolve, reject) => {
         _httpServer!.listen(0, '127.0.0.1', () => {
             const addr = _httpServer!.address() as { port: number } | null;
             if (!addr) { reject(new Error('Failed to get server address')); return; }
             logDebug(`MCP server listening on http://127.0.0.1:${addr.port}/mcp`);
+            void writeMcpJson(addr.port);
             resolve(addr.port);
         });
         _httpServer!.on('error', reject);
     });
 }
 
+/**
+ * Write (or update) .vscode/mcp.json so GitHub Copilot Chat can discover
+ * the CatalystOps MCP server without needing registerMcpServerDefinitionProvider.
+ * The file is rewritten on every extension start because the port is dynamic.
+ */
+async function writeMcpJson(port: number): Promise<void> {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders || folders.length === 0) { return; }
+
+    const vscodeDirUri = vscode.Uri.joinPath(folders[0].uri, '.vscode');
+    const mcpJsonUri   = vscode.Uri.joinPath(vscodeDirUri, 'mcp.json');
+
+    // Preserve any existing entries written by the user / other tools
+    let config: { servers?: Record<string, unknown> } = {};
+    try {
+        const raw = await vscode.workspace.fs.readFile(mcpJsonUri);
+        config = JSON.parse(Buffer.from(raw).toString('utf-8')) as typeof config;
+    } catch { /* file doesn't exist yet — start fresh */ }
+
+    if (!config.servers) { config.servers = {}; }
+    config.servers['CatalystOps'] = {
+        type: 'http',
+        url: `http://127.0.0.1:${port}/mcp`,
+    };
+
+    try { await vscode.workspace.fs.createDirectory(vscodeDirUri); } catch { /* already exists */ }
+    await vscode.workspace.fs.writeFile(
+        mcpJsonUri,
+        Buffer.from(JSON.stringify(config, null, 2) + '\n'),
+    );
+    logDebug(`Wrote .vscode/mcp.json — CatalystOps MCP server at port ${port}`);
+}
+
 export async function stopMcpServer(): Promise<void> {
-    if (_mcpServer) {
-        try { await _mcpServer.close(); } catch { /* ignore */ }
-        _mcpServer = undefined;
-    }
     if (_httpServer) {
         await new Promise<void>((resolve) => {
             _httpServer!.close(() => resolve());

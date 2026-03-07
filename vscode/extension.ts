@@ -188,26 +188,30 @@ export function activate(context: vscode.ExtensionContext): void {
             { dispose: () => { disposeDagWebview(); } },
         );
 
+        const config = vscode.workspace.getConfiguration('catalystops');
+
         // Start MCP server (in-process, Streamable HTTP on a dynamic port)
-        startMcpServer(context).then(port => {
-            logDebug(`MCP server listening on http://127.0.0.1:${port}/mcp`);
-            // VS Code 1.99+ MCP auto-discovery via registerMcpServerDefinitionProvider
-            if ('lm' in vscode && typeof (vscode.lm as any).registerMcpServerDefinitionProvider === 'function') {
-                const registration = (vscode.lm as any).registerMcpServerDefinitionProvider('catalystops', {
-                    provideMcpServerDefinitions: () => [
-                        {
-                            label: 'CatalystOps',
-                            url: vscode.Uri.parse(`http://127.0.0.1:${port}/mcp`),
-                        },
-                    ],
-                });
-                context.subscriptions.push(registration);
-            }
-            // Register stop on deactivate
-            context.subscriptions.push({ dispose: () => { void stopMcpServer(); } });
-        }).catch(err => {
-            logDebug(`MCP server failed to start: ${err instanceof Error ? err.message : String(err)}`);
-        });
+        if (config.get<boolean>('mcp.enabled', true)) {
+            startMcpServer(context).then(port => {
+                logDebug(`MCP server listening on http://127.0.0.1:${port}/mcp`);
+                // VS Code 1.99+ MCP auto-discovery via registerMcpServerDefinitionProvider
+                if ('lm' in vscode && typeof (vscode.lm as any).registerMcpServerDefinitionProvider === 'function') {
+                    const registration = (vscode.lm as any).registerMcpServerDefinitionProvider('catalystops', {
+                        provideMcpServerDefinitions: () => [
+                            {
+                                label: 'CatalystOps',
+                                uri: vscode.Uri.parse(`http://127.0.0.1:${port}/mcp`),
+                            },
+                        ],
+                    });
+                    context.subscriptions.push(registration);
+                }
+                // Register stop on deactivate
+                context.subscriptions.push({ dispose: () => { void stopMcpServer(); } });
+            }).catch(err => {
+                logDebug(`MCP server failed to start: ${err instanceof Error ? err.message : String(err)}`);
+            });
+        }
 
         // Register providers for Python files
         const pythonSelector: vscode.DocumentSelector = { language: 'python', scheme: 'file' };
@@ -221,7 +225,6 @@ export function activate(context: vscode.ExtensionContext): void {
         );
 
         // Run local analysis on active editor
-        const config = vscode.workspace.getConfiguration('catalystops');
         if (config.get<boolean>('analysis.enableLocalCodeAnalysis', true)) {
             // Analyze on open and change
             if (vscode.window.activeTextEditor?.document.languageId === 'python') {
