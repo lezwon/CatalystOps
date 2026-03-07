@@ -1,0 +1,6 @@
+<p>Flags Delta Lake and DLT anti-patterns.</p>
+<ul>
+  <li><code>DeltaTable.merge().execute()</code> without match clauses.</li>
+  <li>DROP TABLE + CREATE TABLE pattern — destroys Delta history; use overwrite mode instead.</li>
+  <li>Bulk inserts without OPTIMIZE/Z-ORDER hints.</li>
+</ul>

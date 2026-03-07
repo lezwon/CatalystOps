@@ -1,0 +1,6 @@
+<p>Flags Structured Streaming patterns that reduce observability or correctness.</p>
+<ul>
+  <li>Missing <code>.queryName()</code> — always name your streaming query.</li>
+  <li><code>trigger(once=True)</code> — deprecated; use <code>trigger(availableNow=True)</code>.</li>
+  <li>Kafka source without <code>withWatermark()</code> — define a watermark to bound state size.</li>
+</ul>

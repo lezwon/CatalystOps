@@ -1,0 +1,5 @@
+<p>Flags inefficient join patterns that can cause Cartesian products or silent data mismatches.</p>
+<ul>
+  <li><code>crossJoin()</code> — produces a Cartesian product; supply explicit join keys.</li>
+  <li><code>union()</code> — merges by column position; use <code>unionByName()</code> for safety.</li>
+</ul>

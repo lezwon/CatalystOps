@@ -1,0 +1,5 @@
+<p>Flags PySpark action calls that trigger full dataset computation or pull data to the driver.</p>
+<p>Flagged methods: <code>collect()</code>, <code>show()</code>, <code>count()</code> in boolean expressions,
+<code>toPandas()</code>, <code>to_pandas_on_spark()</code>, <code>toLocalIterator()</code>,
+<code>display()</code>, <code>foreach()</code>, <code>foreachPartition()</code>.</p>
+<p><b>Fix:</b> Use <code>take(n)</code>, <code>limit(n)</code>, or write results to storage instead of collecting to the driver.</p>

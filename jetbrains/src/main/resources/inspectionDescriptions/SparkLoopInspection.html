@@ -1,0 +1,3 @@
+<p>Flags <code>withColumn()</code> calls inside <code>for</code> or <code>while</code> loops.</p>
+<p>Each iteration adds a new query plan node, creating deeply nested plans and degrading performance.</p>
+<p><b>Fix:</b> Build all column expressions as a list and call <code>select(*exprs)</code> once outside the loop.</p>

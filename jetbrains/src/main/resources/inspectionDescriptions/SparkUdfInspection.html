@@ -1,0 +1,6 @@
+<p>Flags User-Defined Functions that bypass Catalyst optimisations.</p>
+<ul>
+  <li><code>udf()</code> — disables optimisation and adds serialisation overhead.</li>
+  <li><code>pandas_udf()</code> — vectorised but still crosses the JVM boundary.</li>
+</ul>
+<p><b>Fix:</b> Replace with built-in Spark functions where possible.</p>

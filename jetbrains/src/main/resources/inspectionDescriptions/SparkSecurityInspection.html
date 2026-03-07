@@ -1,0 +1,3 @@
+<p>Flags SQL injection risks where <code>spark.sql()</code> is called with an f-string argument.</p>
+<p>Interpolating user-controlled values into SQL strings can lead to data leakage or corruption.</p>
+<p><b>Fix:</b> Use parameterised queries or sanitise inputs before interpolation.</p>

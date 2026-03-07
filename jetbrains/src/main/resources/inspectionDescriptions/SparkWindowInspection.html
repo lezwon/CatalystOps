@@ -1,0 +1,3 @@
+<p>Flags <code>Window.orderBy()</code> without a preceding <code>partitionBy()</code> in the same window specification.</p>
+<p>Without partitioning, all data is sent to a single executor.</p>
+<p><b>Fix:</b> Add <code>.partitionBy(col)</code> before <code>.orderBy(col)</code>.</p>

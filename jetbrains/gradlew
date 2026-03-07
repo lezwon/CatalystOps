@@ -1,0 +1,31 @@
+#!/bin/sh
+# Gradle wrapper script — simplified for POSIX compatibility
+
+# Resolve the directory of this script
+PRG="$0"
+while [ -h "$PRG" ]; do
+    ls=$(ls -ld "$PRG")
+    link=$(expr "$ls" : '.*-> \(.*\)$')
+    case "$link" in
+        /*) PRG="$link" ;;
+        *)  PRG=$(dirname "$PRG")/"$link" ;;
+    esac
+done
+APP_HOME=$(cd "$(dirname "$PRG")" && pwd)
+
+CLASSPATH="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
+
+# Determine java command
+if [ -n "$JAVA_HOME" ]; then
+    JAVACMD="$JAVA_HOME/bin/java"
+else
+    JAVACMD="java"
+fi
+
+exec "$JAVACMD" \
+    ${JAVA_OPTS:-} \
+    ${GRADLE_OPTS:-} \
+    "-Dorg.gradle.appname=$(basename "$0")" \
+    -classpath "$CLASSPATH" \
+    org.gradle.wrapper.GradleWrapperMain \
+    "$@"

@@ -1,0 +1,5 @@
+<p>Flags write operations that may cause data loss or create bottlenecks.</p>
+<ul>
+  <li>Write without <code>.mode()</code> — data may be silently overwritten or duplicated.</li>
+  <li><code>coalesce(1)</code> / <code>repartition(1)</code> — creates a single-partition bottleneck.</li>
+</ul>

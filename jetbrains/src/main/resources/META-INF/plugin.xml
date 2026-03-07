@@ -1,0 +1,94 @@
+<idea-plugin>
+  <id>com.catalystops</id>
+  <name>CatalystOps - PySpark Optimizer</name>
+  <vendor>CatalystOps</vendor>
+  <description>Detect PySpark and Databricks anti-patterns inline as you code.</description>
+  <depends>com.intellij.modules.platform</depends>
+  <depends>com.intellij.modules.python</depends>
+
+  <extensions defaultExtensionNs="com.intellij">
+    <localInspection language="Python"
+      implementationClass="com.catalystops.inspection.SparkActionInspection"
+      displayName="PySpark: Dangerous action calls (collect, show, count, toPandas…)"
+      groupName="CatalystOps" shortName="SparkAction"
+      enabledByDefault="true" level="WARNING" hasStaticDescription="true"/>
+
+    <localInspection language="Python"
+      implementationClass="com.catalystops.inspection.SparkJoinInspection"
+      displayName="PySpark: Inefficient join operations (crossJoin, positional union)"
+      groupName="CatalystOps" shortName="SparkJoin"
+      enabledByDefault="true" level="WARNING" hasStaticDescription="true"/>
+
+    <localInspection language="Python"
+      implementationClass="com.catalystops.inspection.SparkUdfInspection"
+      displayName="PySpark: Inefficient UDF usage (udf, pandas_udf)"
+      groupName="CatalystOps" shortName="SparkUdf"
+      enabledByDefault="true" level="WARNING" hasStaticDescription="true"/>
+
+    <localInspection language="Python"
+      implementationClass="com.catalystops.inspection.SparkWriteInspection"
+      displayName="PySpark: Problematic write patterns (no mode, coalesce/repartition to 1)"
+      groupName="CatalystOps" shortName="SparkWrite"
+      enabledByDefault="true" level="WARNING" hasStaticDescription="true"/>
+
+    <localInspection language="Python"
+      implementationClass="com.catalystops.inspection.SparkShuffleInspection"
+      displayName="PySpark: Global sort / shuffle (orderBy, sort without partition)"
+      groupName="CatalystOps" shortName="SparkShuffle"
+      enabledByDefault="true" level="WARNING" hasStaticDescription="true"/>
+
+    <localInspection language="Python"
+      implementationClass="com.catalystops.inspection.SparkCachingInspection"
+      displayName="PySpark: Repeated source scans without cache/persist"
+      groupName="CatalystOps" shortName="SparkCaching"
+      enabledByDefault="true" level="WARNING" hasStaticDescription="true"/>
+
+    <localInspection language="Python"
+      implementationClass="com.catalystops.inspection.SparkSchemaInspection"
+      displayName="PySpark: Schema inference and wildcard select"
+      groupName="CatalystOps" shortName="SparkSchema"
+      enabledByDefault="true" level="WARNING" hasStaticDescription="true"/>
+
+    <localInspection language="Python"
+      implementationClass="com.catalystops.inspection.SparkStreamingInspection"
+      displayName="PySpark: Structured Streaming best practices"
+      groupName="CatalystOps" shortName="SparkStreaming"
+      enabledByDefault="true" level="WARNING" hasStaticDescription="true"/>
+
+    <localInspection language="Python"
+      implementationClass="com.catalystops.inspection.SparkDeltaInspection"
+      displayName="PySpark: Delta Lake and DLT anti-patterns"
+      groupName="CatalystOps" shortName="SparkDelta"
+      enabledByDefault="true" level="WARNING" hasStaticDescription="true"/>
+
+    <localInspection language="Python"
+      implementationClass="com.catalystops.inspection.SparkConfigInspection"
+      displayName="PySpark: Spark configuration issues (AQE, dynamic partition overwrite)"
+      groupName="CatalystOps" shortName="SparkConfig"
+      enabledByDefault="true" level="WARNING" hasStaticDescription="true"/>
+
+    <localInspection language="Python"
+      implementationClass="com.catalystops.inspection.SparkLoopInspection"
+      displayName="PySpark: withColumn inside loop"
+      groupName="CatalystOps" shortName="SparkLoop"
+      enabledByDefault="true" level="WARNING" hasStaticDescription="true"/>
+
+    <localInspection language="Python"
+      implementationClass="com.catalystops.inspection.SparkWindowInspection"
+      displayName="PySpark: Window.orderBy without partitionBy"
+      groupName="CatalystOps" shortName="SparkWindow"
+      enabledByDefault="true" level="WARNING" hasStaticDescription="true"/>
+
+    <localInspection language="Python"
+      implementationClass="com.catalystops.inspection.SparkSecurityInspection"
+      displayName="PySpark: SQL injection risk (f-string in spark.sql)"
+      groupName="CatalystOps" shortName="SparkSecurity"
+      enabledByDefault="true" level="ERROR" hasStaticDescription="true"/>
+
+    <toolWindow id="CatalystOps" anchor="right"
+      factoryClass="com.catalystops.toolwindow.IssuesToolWindowFactory"
+      icon="/icons/catalystops.svg"/>
+
+    <postStartupActivity implementation="com.catalystops.telemetry.PluginStartupActivity"/>
+  </extensions>
+</idea-plugin>
