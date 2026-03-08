@@ -1,19 +1,39 @@
+# ── Dev tools & config ───────────────────────────────────────────────────────
 .vscode/**
 .vscode-test/**
 .claude/**
-src/**
-vscode/**
-test/**
-python/**
-node_modules/**
-.gitignore
 tsconfig.json
 esbuild.js
+scripts/**
 demo.py
-*.vsix
-**/*.map
+
+# ── Source TypeScript (bundled by esbuild into out/vscode/extension.js) ──────
+vscode/**
 **/*.ts
+**/*.map
+
+# ── Tests ────────────────────────────────────────────────────────────────────
+test/**
+
+# ── Dependencies (bundled) ───────────────────────────────────────────────────
+node_modules/**
+
+# ── Compiled output — keep only the production bundle ────────────────────────
 out/**
 !out/vscode/extension.js
-!media/**
-media/demo.gif
+
+# ── Media — only the icons referenced in package.json ───────────────────────
+media/**
+!media/icon.png
+!media/icon-mono.svg
+
+# ── JetBrains plugin ─────────────────────────────────────────────────────────
+jetbrains/**
+.idea/**
+*.iml
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+src/**
+python/**
+*.vsix
+.gitignore

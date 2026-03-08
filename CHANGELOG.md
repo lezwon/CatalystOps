@@ -2,6 +2,22 @@
 
 All notable changes to CatalystOps are documented here.
 
+## [0.8.1]
+
+### Added
+- **Hover explanations** — all local analysis rules now show a detail explanation and quick-fix code snippet when hovering over a highlighted issue. Covers all Spark, streaming, Delta, and DLT rules including the rules added in 0.6.0.
+
+### Fixed
+- **`CODE_DLT_PARTITION_001`** now detects the Python DLT API (`partition_cols=["col"]`) and SQL `PARTITIONED BY` in addition to the bare `PARTITION BY` keyword.
+- **`CODE_AUTOLOADER_RATE_001`** now triggers on `.format("cloudFiles")` (the standard Auto Loader declaration), not just on the explicit `.option("cloudFiles.format", ...)` option.
+- **`CODE_MERGE_DV_001` / `CODE_MERGE_RLC_001`** now detect the PySpark DeltaTable `.alias(...).merge(...)` API in addition to SQL `MERGE INTO`.
+- **`CODE_ANALYZE_001`** now triggers on `.mode("overwrite").save(...)` in addition to `.saveAsTable()` and `.insertInto()`.
+- Hover popup no longer shows the `CatalystOps(CODE_...)` rule-ID suffix below the message.
+
+### Changed
+- Extension package trimmed: `icon.svg`, `catalystops.css`, and `.gitignore` are no longer included in the `.vsix`. `CHANGELOG.md` is now correctly included for marketplace display.
+
+---
 
 ## [0.8.0]
 
