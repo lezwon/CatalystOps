@@ -751,6 +751,12 @@ spark.sql(f"SELECT * FROM {table}")
         assert.ok(issues.some(i => i.id === 'CODE_ANALYZE_001'), 'INSERT OVERWRITE without ANALYZE should flag');
     });
 
+    test('CODE_ANALYZE_001: flags mode(overwrite).save() without ANALYZE', () => {
+        const code = 'df.write.format("delta").mode("overwrite").save("/path/to/table")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_ANALYZE_001'), 'overwrite .save() without ANALYZE should flag');
+    });
+
     // ── MERGE without Deletion Vectors (CODE_MERGE_DV_001) ───────────────────
 
     test('CODE_MERGE_DV_001: flags MERGE INTO without enableDeletionVectors config', () => {
@@ -758,6 +764,16 @@ spark.sql(f"SELECT * FROM {table}")
         const issues = analyzeCode(code);
         assert.ok(issues.some(i => i.id === 'CODE_MERGE_DV_001'), 'MERGE without DV should be flagged');
         assert.strictEqual(issues.find(i => i.id === 'CODE_MERGE_DV_001')!.severity, 'info');
+    });
+
+    test('CODE_MERGE_DV_001: flags DeltaTable .merge() API without enableDeletionVectors', () => {
+        const code = [
+            'from delta.tables import DeltaTable',
+            'deltaTable = DeltaTable.forName(spark, "my_table")',
+            'deltaTable.alias("t").merge(source.alias("s"), "t.id = s.id").whenMatchedUpdateAll().execute()',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_MERGE_DV_001'), 'DeltaTable .merge() without DV should flag');
     });
 
     test('no CODE_MERGE_DV_001 when enableDeletionVectors is referenced', () => {
@@ -776,6 +792,16 @@ spark.sql(f"SELECT * FROM {table}")
         const issues = analyzeCode(code);
         assert.ok(issues.some(i => i.id === 'CODE_MERGE_RLC_001'), 'MERGE without RLC should be flagged');
         assert.strictEqual(issues.find(i => i.id === 'CODE_MERGE_RLC_001')!.severity, 'info');
+    });
+
+    test('CODE_MERGE_RLC_001: flags DeltaTable .merge() API without enableRowLevelConcurrency', () => {
+        const code = [
+            'from delta.tables import DeltaTable',
+            'deltaTable = DeltaTable.forName(spark, "my_table")',
+            'deltaTable.alias("t").merge(source.alias("s"), "t.id = s.id").whenMatchedUpdateAll().execute()',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_MERGE_RLC_001'), 'DeltaTable .merge() without RLC should flag');
     });
 
     test('no CODE_MERGE_RLC_001 when enableRowLevelConcurrency is referenced', () => {
@@ -799,6 +825,16 @@ spark.sql(f"SELECT * FROM {table}")
         const issues = analyzeCode(code);
         assert.ok(issues.some(i => i.id === 'CODE_AUTOLOADER_RATE_001'), 'missing maxBytesPerTrigger should flag');
         assert.strictEqual(issues.find(i => i.id === 'CODE_AUTOLOADER_RATE_001')!.severity, 'info');
+    });
+
+    test('CODE_AUTOLOADER_RATE_001: flags .format("cloudFiles") without maxBytesPerTrigger', () => {
+        const code = [
+            'stream = (spark.readStream',
+            '    .format("cloudFiles")',
+            '    .load(path))',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_AUTOLOADER_RATE_001'), '.format("cloudFiles") without maxBytesPerTrigger should flag');
     });
 
     test('no CODE_AUTOLOADER_RATE_001 when maxBytesPerTrigger is set', () => {
@@ -852,6 +888,26 @@ spark.sql(f"SELECT * FROM {table}")
         const issues = analyzeCode(code);
         assert.ok(issues.some(i => i.id === 'CODE_DLT_PARTITION_001'), 'PARTITION BY in DLT file should flag');
         assert.strictEqual(issues.find(i => i.id === 'CODE_DLT_PARTITION_001')!.severity, 'warning');
+    });
+
+    test('CODE_DLT_PARTITION_001: flags Python partition_cols= in a DLT file', () => {
+        const code = [
+            '@dlt.table(partition_cols=["event_date"])',
+            'def my_table():',
+            '    return spark.sql("SELECT * FROM LIVE.src")',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_DLT_PARTITION_001'), 'partition_cols= in DLT file should flag');
+    });
+
+    test('CODE_DLT_PARTITION_001: flags PARTITIONED BY in a DLT SQL file', () => {
+        const code = [
+            'CREATE OR REPLACE LIVE TABLE my_table',
+            'PARTITIONED BY (event_date)',
+            'AS SELECT id, event_date FROM LIVE.src',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_DLT_PARTITION_001'), 'PARTITIONED BY in DLT SQL file should flag');
     });
 
     test('no CODE_DLT_PARTITION_001 in a non-DLT file', () => {

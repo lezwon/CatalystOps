@@ -945,8 +945,8 @@ ${varName} = spark.read.parquet("path").cache()`,
     // Without table statistics, the optimizer cannot make accurate decisions for
     // join ordering, broadcast thresholds, and partition pruning.
     {
-        // Match write overwrite patterns: .mode("overwrite") ... .saveAsTable() or SQL INSERT OVERWRITE
-        const overwriteRe = /(?:\.mode\s*\(\s*["']overwrite["']\s*\)[\s\S]{0,300}?\.(?:saveAsTable|insertInto)\s*\(|INSERT\s+OVERWRITE\b)/gi;
+        // Match write overwrite patterns: .mode("overwrite") ... .save/saveAsTable/insertInto() or SQL INSERT OVERWRITE
+        const overwriteRe = /(?:\.mode\s*\(\s*["']overwrite["']\s*\)[\s\S]{0,300}?\.(?:saveAsTable|insertInto|save)\s*\(|INSERT\s+OVERWRITE\b)/gi;
         let owm: RegExpExecArray | null;
         while ((owm = overwriteRe.exec(code)) !== null) {
             const offset = owm.index;
@@ -996,7 +996,12 @@ spark.sql("ANALYZE TABLE my_catalog.my_schema.my_table COMPUTE STATISTICS FOR CO
     // concurrent MERGE operations on the same table without full table locks.
     // Both are detected together since they're almost always set as a pair.
     {
-        const mergeRe2 = /\bMERGE\s+INTO\b/gi;
+        // Match SQL MERGE INTO or PySpark DeltaTable .merge() API
+        // When DeltaTable is referenced, .alias(...).merge( is the idiomatic chained call.
+        const hasDeltaTable = /\bDeltaTable\b/.test(code);
+        const mergeRe2 = hasDeltaTable
+            ? /\bMERGE\s+INTO\b|\.alias\s*\([^)]*\)\s*\.merge\s*\(/gi
+            : /\bMERGE\s+INTO\b/gi;
         let m2: RegExpExecArray | null;
         // Only flag once per file — these are table-level settings
         let dvFlagged = false;
@@ -1077,7 +1082,8 @@ spark.sql("""
     // processes all available files in a single micro-batch, which can cause OOM
     // on first runs after a backlog accumulates.
     {
-        const autoLoaderRe = /\.option\s*\(\s*["']cloudFiles\.format["']/g;
+        // Detect Auto Loader via .format("cloudFiles") or the cloudFiles.format option
+        const autoLoaderRe = /\.format\s*\(\s*["']cloudFiles["']\s*\)|\.option\s*\(\s*["']cloudFiles\.format["']/g;
         let alm: RegExpExecArray | null;
         while ((alm = autoLoaderRe.exec(code)) !== null) {
             const offset = alm.index;
@@ -1532,7 +1538,8 @@ enriched = stream_df.join(dim_df, on="customer_id", how="left")
         // DLT tables should use Liquid Clustering (CLUSTER BY), not traditional
         // partition columns (PARTITION BY), which creates fixed-layout partitions.
         {
-            const dltPartRe = /\bPARTITION\s+BY\b/gi;
+            // Match SQL PARTITION BY / PARTITIONED BY and Python DLT partition_cols= kwarg
+            const dltPartRe = /\bPARTITION(?:ED)?\s+BY\b|\bpartition_cols\s*=/gi;
             let dpm: RegExpExecArray | null;
             while ((dpm = dltPartRe.exec(code)) !== null) {
                 const offset = dpm.index;

@@ -2,15 +2,6 @@
 
 All notable changes to CatalystOps are documented here.
 
-## [Unreleased]
-
-### Added
-- Dry-run timeout is now configurable via `catalystops.dryRun.timeoutSeconds` (default: 300s, minimum: 30s). Applies to both cluster and serverless execution modes.
-
-### Fixed
-- Safety wrapper no longer corrupts subscript filter expressions containing `==` (e.g. `df[df.eventtype == E1_view].eventtype.count()`). The second `=` of a `==` operator was incorrectly treated as an assignment.
-
----
 
 ## [0.8.0]
 
@@ -20,6 +11,8 @@ All notable changes to CatalystOps are documented here.
 - **Context-aware quick fixes** on plan tree nodes: broadcast hint for inefficient joins, repartition for unnecessary exchanges, persist for repeated scans, AQE config for sort-merge joins, and join-condition hint for cartesian products.
 - **Plan Tree Builder** — structured representation of Spark physical plans with cost scoring per operation type.
 - Analysis cache now tracks the source line for each captured DataFrame, enabling accurate source mapping in the plan view.
+- Dry-run timeout is now configurable via `catalystops.dryRun.timeoutSeconds` (default: 300s, minimum: 30s). Applies to both cluster and serverless execution modes.
+
 
 ---
 

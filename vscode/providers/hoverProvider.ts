@@ -13,16 +13,43 @@ interface FixEntry {
     config?: Record<string, string>;
 }
 
-// Keyed by issue ID — used as fallback when the title is dynamic (contains variable names).
-const ISSUE_INFO_BY_ID: Record<string, FixEntry> = {
-    'SCHEMA_ALIGN_001': {
-        detail: 'These DataFrames have the same column names but in a different order. ' +
-            'Positional operations — `union()`, `intersect()`, `except()`, `subtract()` — match ' +
-            'rows by column **position**, not name. Mismatched ordering silently puts values in ' +
-            'the wrong columns.',
-        fix: '# Reorder the later DataFrame to match the first:\ndf2 = df2.select("col1", "col2", "col3")\n\n# Or use unionByName() which ignores column order:\nresult = df1.unionByName(df2)',
+// Fallback for dynamic titles — tested in order, first match wins.
+const ISSUE_INFO_BY_PATTERN: Array<{ pattern: RegExp; entry: FixEntry }> = [
+    {
+        // CODE_REPRO_001: '"varName" scanned N× — consider caching'
+        pattern: / scanned \d+× — consider caching$/,
+        entry: {
+            detail: 'This source DataFrame is read multiple times without `.cache()` or `.persist()`. Each use triggers a full re-scan of the underlying data — expensive on large datasets. Cache immediately after the first read and reuse the result.',
+            fix: 'df = spark.read.parquet("path").cache()  # materialise once\n\n# Reuse df everywhere instead of reading the source again',
+        },
     },
-};
+    {
+        // CODE_FLOAT_FINANCIAL_001: 'FLOAT/DOUBLE for financial column "col" — use DECIMAL instead'
+        pattern: /^FLOAT\/DOUBLE for financial column /,
+        entry: {
+            detail: '`FloatType` and `DoubleType` use binary floating-point and cannot exactly represent most decimal fractions, causing silent rounding errors in financial calculations (e.g. `0.1 + 0.2 ≠ 0.3`). Use `DecimalType` for all monetary values.',
+            fix: `# Instead of:
+StructField("amount", FloatType())   # binary float — imprecise
+
+# Use:
+StructField("amount", DecimalType(18, 2))  # exact decimal
+
+# In SQL DDL:
+amount DECIMAL(18, 2)`,
+        },
+    },
+    {
+        // SCHEMA_ALIGN_001: dynamic title with column name
+        pattern: /column order mismatch|schema.*align/i,
+        entry: {
+            detail: 'These DataFrames have the same column names but in a different order. ' +
+                'Positional operations — `union()`, `intersect()`, `except()`, `subtract()` — match ' +
+                'rows by column **position**, not name. Mismatched ordering silently puts values in ' +
+                'the wrong columns.',
+            fix: '# Reorder the later DataFrame to match the first:\ndf2 = df2.select("col1", "col2", "col3")\n\n# Or use unionByName() which ignores column order:\nresult = df1.unionByName(df2)',
+        },
+    },
+];
 
 // Keyed by the exact issue title (= diagnostic.message after the message-shortening fix)
 const ISSUE_INFO: Record<string, FixEntry> = {
@@ -232,6 +259,186 @@ streaming_df.withWatermark("event_time", "1 hour").dropDuplicates(["id", "event_
         fix: '# Tune for ~200 MB per partition:\nspark.conf.set("spark.sql.shuffle.partitions", 1000)  # adjust to your data size\n\n# Or let AQE tune it automatically (Spark 3.0+):\nspark.conf.set("spark.sql.adaptive.enabled", "true")\nspark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")',
         config: { 'spark.sql.shuffle.partitions': '1000' },
     },
+
+    // ── Rules added in 0.6.0 ──────────────────────────────────────────────────
+
+    'No ANALYZE TABLE after overwrite — optimizer may lack statistics': {
+        detail: 'After overwriting a table, column statistics are stale or absent. Without statistics Spark cannot accurately estimate join sizes, choose broadcast thresholds, or prune partitions effectively.',
+        fix: `df.write.mode("overwrite").saveAsTable("my_table")
+spark.sql("ANALYZE TABLE my_table COMPUTE STATISTICS FOR ALL COLUMNS")`,
+    },
+    'MERGE without Deletion Vectors — enable for faster MERGE performance': {
+        detail: 'Without Deletion Vectors, every MERGE that deletes or updates rows must physically rewrite the affected data files. Deletion Vectors convert these to cheap soft-deletes — often 5–10× faster on update-heavy workloads.',
+        fix: `spark.sql("""
+    ALTER TABLE my_table
+    SET TBLPROPERTIES ('delta.enableDeletionVectors' = 'true')
+""")`,
+    },
+    'MERGE without Row-Level Concurrency — enable for concurrent MERGE support': {
+        detail: 'Without Row-Level Concurrency, concurrent MERGEs on the same table conflict at the file level, causing retries or failures. Enabling it (alongside Deletion Vectors) allows concurrent MERGEs on different rows to succeed without blocking.',
+        fix: `spark.sql("""
+    ALTER TABLE my_table
+    SET TBLPROPERTIES (
+        'delta.enableDeletionVectors' = 'true',
+        'delta.enableRowLevelConcurrency' = 'true'
+    )
+""")`,
+    },
+    'Auto Loader stream without maxBytesPerTrigger — no backlog protection': {
+        detail: 'Without `maxBytesPerTrigger`, Auto Loader processes all available files in one micro-batch when a backlog exists (first run or after downtime). This can cause executor OOM errors. Cap the data volume per batch.',
+        fix: `stream = (spark.readStream
+    .format("cloudFiles")
+    .option("cloudFiles.format", "json")
+    .option("maxBytesPerTrigger", "100m")  # cap per batch (100–500 MB is typical)
+    .load(path))`,
+    },
+    'Stateful streaming without RocksDB — consider enabling for large state': {
+        detail: 'The default in-memory state store holds all state in executor heap. For large state (> 10 GB or > 100M keys), heap fills up causing OOM. RocksDB spills to local disk and supports much larger state with minimal overhead.',
+        fix: `spark.conf.set(
+    "spark.sql.streaming.stateStore.providerClass",
+    "com.databricks.sql.streaming.state.RocksDBStateProvider"
+)`,
+    },
+    'Streaming query has no .trigger() — continuous micro-batches': {
+        detail: 'Without `.trigger()`, Spark runs micro-batches as fast as possible — excessive cloud storage listing, high compute costs, unpredictable latency. Set an interval matching your SLA (rule of thumb: SLA ÷ 3). Use `availableNow=True` for cheapest batch-style runs.',
+        fix: `# Fixed interval:
+df.writeStream \\
+    .trigger(processingTime="5 minutes") \\
+    .start()
+
+# Batch-style (cheapest — run once, then stop):
+df.writeStream \\
+    .trigger(availableNow=True) \\
+    .start()`,
+    },
+    'Streaming groupBy() without .withWatermark() — unbounded state': {
+        detail: 'Streaming aggregations maintain state for every key seen. Without `.withWatermark()`, state grows indefinitely and will eventually exhaust executor memory.',
+        fix: `df.withWatermark("event_time", "1 hour") \\
+    .groupBy(
+        F.window("event_time", "10 minutes"),
+        "user_id"
+    ).agg(F.count("*"))
+
+# Rule of thumb: set watermark to 2–3× your p95 event latency`,
+    },
+    'DROP TABLE + CREATE TABLE — use CREATE OR REPLACE TABLE instead': {
+        detail: '`DROP TABLE` + `CREATE TABLE` is non-atomic: concurrent readers see a missing table between the two statements, time-travel history is permanently deleted, and a failure between the two leaves no table at all.',
+        fix: `# Single atomic operation — preserves readers and time travel:
+spark.sql("""
+    CREATE OR REPLACE TABLE my_table (
+        id BIGINT, name STRING
+    ) USING DELTA
+""")`,
+    },
+    'Streaming query has no queryName — hard to identify in Spark UI': {
+        detail: 'Without a `queryName`, streaming queries appear as random UUIDs in the Spark UI, structured streaming metrics, and logs. A descriptive name makes it easy to identify and alert on specific streams.',
+        fix: `df.writeStream \\
+    .option("queryName", "events_to_silver")  # descriptive name
+    .trigger(processingTime="5 minutes") \\
+    .start()`,
+    },
+    'OPTIMIZE after every MERGE — causes latency spikes per batch': {
+        detail: 'Running `OPTIMIZE` after each MERGE triggers a full compaction pass on every micro-batch, adding significant latency. Enable Liquid Clustering so Delta compacts incrementally and automatically — no manual `OPTIMIZE` needed.',
+        fix: `# Enable Liquid Clustering on the target table (one-time setup):
+spark.sql("ALTER TABLE my_table CLUSTER BY (merge_key, event_date)")
+
+# Remove per-batch OPTIMIZE from foreachBatch:
+# spark.sql(f"OPTIMIZE {target_table}")  ← delete this line`,
+    },
+    'Inner join in streaming context may silently drop events': {
+        detail: 'In a stream-static join, an inner join silently drops streaming events with no matching dimension record at processing time. Late-arriving dimension data can never recover those dropped events.',
+        fix: `# Use left join to preserve all streaming events:
+enriched = stream_df.join(dim_df, on="customer_id", how="left")
+
+# Monitor null rates to detect unmatched events:
+# enriched.filter(F.col("dim_col").isNull()).count()`,
+    },
+
+    // ── DLT rules ─────────────────────────────────────────────────────────────
+
+    'DLT table uses PARTITION BY — use CLUSTER BY (Liquid Clustering) instead': {
+        detail: '`PARTITION BY` creates fixed-layout partitions requiring manual `OPTIMIZE` runs and degrades performance with high cardinality. `CLUSTER BY` (Liquid Clustering) compacts data incrementally and automatically, replacing both `PARTITION BY` and `ZORDER BY`.',
+        fix: `# Instead of:
+@dlt.table(partition_cols=["event_date"])
+
+# Use:
+@dlt.table(cluster_by=["event_date", "event_type"])  # 1–4 keys
+
+# In SQL:
+-- CLUSTER BY (event_date, event_type)`,
+    },
+    'SELECT * in DLT pipeline — select only needed columns': {
+        detail: '`SELECT *` reads all columns including ones downstream consumers do not use, increasing I/O and storage. Selecting specific columns also improves Liquid Clustering effectiveness.',
+        fix: `-- Select specific columns:
+SELECT event_id, user_id, event_time, event_type, payload
+FROM LIVE.source_table`,
+    },
+    'read_files() without schemaHints — schema drift risk in production': {
+        detail: '`read_files()` without `schemaHints` scans all files to infer the schema on startup (slow) and is vulnerable to schema drift — a new upstream field with an incompatible type breaks the pipeline silently.',
+        fix: `SELECT * FROM read_files(
+    "s3://bucket/events/",
+    format => "json",
+    schemaHints => "event_id BIGINT, user_id STRING, amount DECIMAL(18,2)"
+)
+-- New columns not in schemaHints are still inferred automatically`,
+    },
+    'APPLY AS DELETE WHEN after SEQUENCE BY — wrong clause order in AUTO CDC': {
+        detail: 'In `APPLY CHANGES INTO`, `APPLY AS DELETE WHEN` must appear **before** `SEQUENCE BY`. Placing it after causes a syntax error or incorrect CDC behavior where deletes are not applied.',
+        fix: `-- Correct clause order:
+APPLY CHANGES INTO LIVE.target_table
+FROM STREAM(LIVE.source_cdc)
+KEYS (id)
+APPLY AS DELETE WHEN operation = "DELETE"  -- ← before SEQUENCE BY
+SEQUENCE BY updated_at
+COLUMNS * EXCEPT (operation, updated_at)`,
+    },
+    'CLUSTER BY AUTO in production — consider explicit cluster keys': {
+        detail: '`CLUSTER BY AUTO` is useful for prototyping, but explicit keys chosen to match your query filter patterns outperform `AUTO` for production tables (especially under 10 TB). `AUTO` adds overhead from analyzing query statistics to infer clustering columns.',
+        fix: `-- Replace AUTO with explicit keys matching your most common filter columns:
+CLUSTER BY (event_date, user_id)
+
+-- Guidelines:
+--   1–4 cluster keys (2 often outperform 4 for tables < 10 TB)
+--   Prefer low-to-medium cardinality: date, region, event_type — not UUID`,
+    },
+    'Z-ORDER / ZORDER instead of Liquid Clustering': {
+        detail: '`ZORDER BY` is a legacy optimization that rewrites the entire table or partition on each `OPTIMIZE` run. Liquid Clustering (`CLUSTER BY`) replaces it with incremental, automatic compaction — faster, cheaper, and no manual `OPTIMIZE` needed.',
+        fix: `# Remove per-run OPTIMIZE + ZORDER:
+# OPTIMIZE my_table ZORDER BY (event_date, user_id)  ← delete this
+
+# Set Liquid Clustering once at table creation:
+CREATE TABLE my_table (...) USING DELTA
+CLUSTER BY (event_date, user_id)
+
+# Or add to an existing table:
+ALTER TABLE my_table CLUSTER BY (event_date, user_id)`,
+    },
+    'Dynamic allocation enabled on streaming cluster': {
+        detail: 'Dynamic allocation scales executors up and down based on backlog, causing unpredictable latency spikes and executor churn on streaming workloads. When the cluster scales in during a quiet period it must ramp up again when load returns, adding restart latency to every batch.',
+        fix: `# Remove dynamic allocation for streaming jobs:
+# spark.conf.set("spark.dynamicAllocation.enabled", "true")  ← remove
+
+# Use a fixed cluster sized to handle peak throughput.
+# For cost efficiency with variable load, use availableNow=True:
+df.writeStream.trigger(availableNow=True).start()`,
+    },
+    'Kafka auto-commit enabled': {
+        detail: '`kafka.enable.auto.commit = true` lets Kafka manage offset commits independently of Spark\'s checkpoint. This causes **data loss** (offsets committed before processing completes) or **duplication** (offsets committed for records that were never processed). Spark manages Kafka offsets via checkpoints — always disable auto-commit.',
+        fix: `stream = (spark.readStream
+    .format("kafka")
+    .option("kafka.enable.auto.commit", "false")  # Spark manages offsets
+    .option("checkpointLocation", "/Volumes/catalog/schema/checkpoints/stream")
+    .load())`,
+    },
+    'Streaming checkpoint stored on DBFS': {
+        detail: 'DBFS is workspace-local and not designed for production checkpoint storage. Checkpoint corruption or loss causes the stream to restart from the beginning, risking data loss or unbounded reprocessing.',
+        fix: `# Use Unity Catalog Volumes (recommended):
+.option("checkpointLocation", "/Volumes/catalog/schema/checkpoints/my_stream")
+
+# Or cloud-native paths:
+.option("checkpointLocation", "s3://my-bucket/checkpoints/my_stream")
+.option("checkpointLocation", "abfss://container@account.dfs.core.windows.net/checkpoints/stream")`,
+    },
 };
 
 export function createHoverProvider(): vscode.HoverProvider {
@@ -258,7 +465,7 @@ export function createHoverProvider(): vscode.HoverProvider {
                 md.appendMarkdown(`### ${icon} ${diag.message}\n\n`);
 
                 const info = ISSUE_INFO[diag.message]
-                    ?? (typeof diag.code === 'string' ? ISSUE_INFO_BY_ID[diag.code] : undefined);
+                    ?? ISSUE_INFO_BY_PATTERN.find(p => p.pattern.test(diag.message))?.entry;
                 if (info) {
                     md.appendMarkdown(`${info.detail}\n\n`);
                     if (info.fix) {
