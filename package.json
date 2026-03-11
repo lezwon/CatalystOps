@@ -234,6 +234,86 @@
         }
       ]
     },
+    "walkthroughs": [
+      {
+        "id": "catalystops.gettingStarted",
+        "title": "Get started with CatalystOps",
+        "description": "Optimize PySpark code and reduce Databricks costs — from instant local analysis to deep Catalyst plan inspection.",
+        "steps": [
+          {
+            "id": "catalystops.gettingStarted.welcome",
+            "title": "Welcome to CatalystOps",
+            "description": "Two layers of analysis: instant local anti-pattern detection and deep Catalyst plan analysis via Databricks dry runs.",
+            "media": {
+              "markdown": "media/walkthrough/01-welcome.md"
+            }
+          },
+          {
+            "id": "catalystops.gettingStarted.localAnalysis",
+            "title": "Instant Local Analysis",
+            "description": "Open any PySpark file and CatalystOps immediately flags anti-patterns — cartesian joins, Python UDFs, missing cache, and 25+ more. No cluster needed.\n[Open the Issues Panel](command:catalystops.issuesTree.focus)",
+            "media": {
+              "markdown": "media/walkthrough/02-local-analysis.md"
+            },
+            "completionEvents": [
+              "onView:catalystops.issuesTree"
+            ]
+          },
+          {
+            "id": "catalystops.gettingStarted.connect",
+            "title": "Connect to Databricks",
+            "description": "Configure your workspace URL, access token, and cluster ID (or choose serverless mode) to enable deep plan analysis.\n[Configure Connection](command:catalystops.configureConnection)",
+            "media": {
+              "markdown": "media/walkthrough/03-connect.md"
+            },
+            "completionEvents": [
+              "onCommand:catalystops.configureConnection"
+            ]
+          },
+          {
+            "id": "catalystops.gettingStarted.dryRun",
+            "title": "Run a Deep Analysis",
+            "description": "Press **⌘⇧K** (macOS) or **Ctrl+Shift+K** to submit your code to Databricks, capture the Catalyst physical plan, and see cost-aware diagnostics.\n[Run Dry Run](command:catalystops.analyzeCost)",
+            "media": {
+              "markdown": "media/walkthrough/04-dry-run.md"
+            },
+            "completionEvents": [
+              "onCommand:catalystops.analyzeCost"
+            ]
+          },
+          {
+            "id": "catalystops.gettingStarted.explainPlan",
+            "title": "Explore the Execution Plan",
+            "description": "After a dry run, inspect plan operators in the sidebar tree and open the visual DAG — click any node to jump to the source line.\n[Show Plan DAG](command:catalystops.showPlanDag)",
+            "media": {
+              "markdown": "media/walkthrough/05-explain-plan.md"
+            },
+            "completionEvents": [
+              "onCommand:catalystops.showPlanDag"
+            ]
+          },
+          {
+            "id": "catalystops.gettingStarted.billing",
+            "title": "Track Databricks Costs",
+            "description": "See your DBU usage and spend broken down by cluster and job — pulled live from system.billing.usage.\n[Open Billing Dashboard](command:catalystops.showBillingDashboard)",
+            "media": {
+              "markdown": "media/walkthrough/06-billing.md"
+            },
+            "completionEvents": [
+              "onCommand:catalystops.showBillingDashboard"
+            ]
+          },
+          {
+            "id": "catalystops.gettingStarted.mcp",
+            "title": "AI Integration via MCP",
+            "description": "CatalystOps exposes a local MCP server so Claude, GitHub Copilot, and other AI assistants can analyze your code, read plan results, and query billing data.",
+            "media": {
+              "markdown": "media/walkthrough/07-mcp.md"
+            }
+          }
+        ]
+      }
+    ],
     "mcpServerDefinitionProviders": [
       {
         "id": "catalystops",
