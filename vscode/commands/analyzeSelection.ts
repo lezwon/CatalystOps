@@ -47,6 +47,13 @@ export async function analyzeSelection(
         const info = offsetIssues.filter(i => i.severity === Severity.INFO || i.severity === Severity.SUGGESTION).length;
         setResults(critical, warnings, info);
 
+        sendEvent('analyze_selection/complete', {
+            issueCount: String(offsetIssues.length),
+            criticalCount: String(critical),
+            warningCount: String(warnings),
+            infoCount: String(info),
+        });
+
         vscode.window.showInformationMessage(
             `CatalystOps: Found ${offsetIssues.length} issues in selection.`,
         );

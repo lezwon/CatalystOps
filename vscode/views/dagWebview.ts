@@ -5,6 +5,7 @@
 
 import * as vscode from 'vscode';
 import { PlanNode } from '../analysis/planTreeBuilder';
+import { sendEvent } from '../telemetry';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 
@@ -29,6 +30,7 @@ export function showDagWebview(
 
     currentPanel.webview.onDidReceiveMessage(msg => {
         if (msg.type === 'nodeClick' && typeof msg.sourceLine === 'number') {
+            sendEvent('dag/node_click', { operator: String(msg.operator ?? '') });
             void vscode.commands.executeCommand('revealLine', {
                 lineNumber: msg.sourceLine,
                 at: 'center',
@@ -178,7 +180,7 @@ function generateHtml(roots: PlanNode[]): string {
             ? 'filter="url(#glow-red)"'
             : node.severity === 'warning' ? 'filter="url(#glow-orange)"' : '';
 
-        return `<g class="dag-node" onclick="nodeClick(${srcLine})">
+        return `<g class="dag-node" onclick="nodeClick(${srcLine}, '${escapeHtml(node.operatorName)}')">
             <rect x="${x}" y="${y}" width="${NODE_W}" height="${NODE_H}" rx="6"
                   fill="${fill}" ${glowFilter} opacity="0.92"/>
             <text x="${x + NODE_W / 2}" y="${y + 16}" text-anchor="middle"
@@ -245,9 +247,9 @@ function generateHtml(roots: PlanNode[]): string {
     </svg>
     <script>
         const vscodeApi = acquireVsCodeApi();
-        function nodeClick(sourceLine) {
+        function nodeClick(sourceLine, operator) {
             if (sourceLine >= 0) {
-                vscodeApi.postMessage({ type: 'nodeClick', sourceLine: sourceLine });
+                vscodeApi.postMessage({ type: 'nodeClick', sourceLine: sourceLine, operator: operator });
             }
         }
     </script>

@@ -124,6 +124,7 @@ export async function analyzeCost(
     context: vscode.ExtensionContext,
     issuesTreeProvider: IssuesTreeDataProvider,
 ): Promise<void> {
+    const _dryRunStart = Date.now();
     sendEvent('command/analyze_cost');
 
     const editor = vscode.window.activeTextEditor;
@@ -478,6 +479,16 @@ export async function analyzeCost(
             issueCount: String(totalIssues),
             localIssueCount: String(localIssues.length),
             dryRunIssueCount: String(dryRunCount),
+        });
+
+        sendEvent('dry_run/complete', {
+            executionMode: config.executionMode,
+            dataframeCount: String(analysisResults.length),
+            planIssueCount: String(planIssues.length),
+            localIssueCount: String(localIssues.length),
+            durationMs: String(Date.now() - _dryRunStart),
+            costEstimate: runCost.formatted,
+            hasTableStats: String(Object.keys(tableStats).length > 0),
         });
 
         const msg = `CatalystOps: Analysis complete. ${totalIssues} issues found (${localIssues.length} local, ${dryRunCount} from dry run). Estimated cost: ${runCost.formatted}.`;

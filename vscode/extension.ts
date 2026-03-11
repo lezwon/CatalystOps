@@ -55,7 +55,15 @@ export function activate(context: vscode.ExtensionContext): void {
                 const dfMap = activeDoc
                     ? getDataFrameLineMap(activeDoc.uri.toString())
                     : new Map<string, number>();
-                explainTreeProvider.update(getCachedResults(), getCachedPlanIssues(), dfMap);
+                const results = getCachedResults();
+                const planIssues = getCachedPlanIssues();
+                explainTreeProvider.update(results, planIssues, dfMap);
+                if (results.length > 0) {
+                    sendEvent('explain_plan/updated', {
+                        dataframeCount: String(results.length),
+                        planIssueCount: String(planIssues.length),
+                    });
+                }
             }),
         );
 
@@ -87,6 +95,7 @@ export function activate(context: vscode.ExtensionContext): void {
                     ? getDataFrameLineMap(activeDoc.uri.toString())
                     : new Map<string, number>();
                 const nodes = buildPlanTrees(getCachedResults(), getCachedPlanIssues(), dfMap);
+                sendEvent('dag/opened', { nodeCount: String(nodes.length) });
                 showDagWebview(context, nodes);
             }),
 
