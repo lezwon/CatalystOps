@@ -1,8 +1,8 @@
 import TelemetryReporter from '@vscode/extension-telemetry';
 import * as vscode from 'vscode';
+import { computeNudgeState } from './nudgeState';
 
 let _appName: string | undefined;
-import { computeNudgeState } from './nudgeState';
 
 const INSTRUMENTATION_CONNECTION_STRING = 'InstrumentationKey=c2a13996-87aa-4c32-8ed1-efb11c5a18e2;IngestionEndpoint=https://westus3-1.in.applicationinsights.azure.com/;LiveEndpoint=https://westus3.livediagnostics.monitor.azure.com/;ApplicationId=f4fedf89-8fdb-4fee-b968-dc56272aa051';
 
