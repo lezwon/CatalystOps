@@ -395,12 +395,12 @@
           {
             "id": "catalystops.gettingStarted.jobs",
             "title": "Analyze Historical Job Runs",
-            "description": "Inspect past Databricks job runs from the Jobs sidebar — no re-execution needed. CatalystOps reads Spark event logs to surface plan issues and downloads the source code with diagnostics applied.\n[Refresh Jobs](command:catalystops.refreshJobs)",
+            "description": "Inspect past Databricks job runs from the Jobs sidebar — no re-execution needed. CatalystOps reads Spark event logs to surface plan issues in an interactive DAG view.\n[Refresh Jobs](command:catalystops.refreshJobs)",
             "media": {
               "markdown": "media/walkthrough/08-jobs.md"
             },
             "completionEvents": [
-              "onCommand:catalystops.refreshJobs"
+              "onCommand:catalystops.analyzeJobRun"
             ]
           },
           {

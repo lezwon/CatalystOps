@@ -13,7 +13,7 @@ import { createDiagnosticCollection, setCodeIssueDiagnostics, clearDiagnostics }
 import { createStatusBar, setIdle, setAnalyzing, setResults, setError } from './views/statusBar';
 import { analyzeCost, showGeneratedScript, previewDryRunScript, previewFullDryRunScript, showFullDryRunScript } from './commands/analyzeCost';
 import { initOutputChannel, logDebug, logError } from './logger';
-import { initTelemetry, sendEvent, maybeShowFeedbackToast, maybeShowDryRunNudge, incrementSessionCount } from './telemetry';
+import { initTelemetry, sendEvent, maybeShowFeedbackToast, maybeShowDryRunNudge, incrementSessionCount, trackWalkthroughStart, trackWalkthroughStep } from './telemetry';
 import { analyzeSelection } from './commands/analyzeSelection';
 import { showReport } from './commands/showReport';
 import { configureConnection } from './commands/configureConnection';
@@ -40,6 +40,7 @@ export function activate(context: vscode.ExtensionContext): void {
     initTelemetry(context);
     sendEvent('extension/activated');
     void incrementSessionCount();
+    trackWalkthroughStart();
 
     try {
         const diagnostics = createDiagnosticCollection();
@@ -47,7 +48,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
         // Issues tree view
         const issuesTreeProvider = new IssuesTreeDataProvider();
-        vscode.window.registerTreeDataProvider('catalystops.issuesTree', issuesTreeProvider);
+        const issuesTreeView = vscode.window.createTreeView('catalystops.issuesTree', { treeDataProvider: issuesTreeProvider });
+        context.subscriptions.push(issuesTreeView);
+        issuesTreeView.onDidChangeVisibility(e => {
+            if (e.visible) { trackWalkthroughStep('local-analysis'); }
+        }, undefined, context.subscriptions);
 
         // Explain Plan tree view
         const explainTreeProvider = new ExplainTreeDataProvider();
@@ -101,16 +106,16 @@ export function activate(context: vscode.ExtensionContext): void {
         context.subscriptions.push(
             diagnostics,
             statusBar,
-            vscode.commands.registerCommand('catalystops.analyzeCost', () => analyzeCost(context, issuesTreeProvider)),
+            vscode.commands.registerCommand('catalystops.analyzeCost', () => { trackWalkthroughStep('dry-run'); return analyzeCost(context, issuesTreeProvider); }),
             vscode.commands.registerCommand('catalystops.analyzeSelection', () => analyzeSelection(context, issuesTreeProvider)),
             vscode.commands.registerCommand('catalystops.showReport', () => showReport(context)),
-            vscode.commands.registerCommand('catalystops.configureConnection', () => configureConnection()),
+            vscode.commands.registerCommand('catalystops.configureConnection', () => { trackWalkthroughStep('connect'); return configureConnection(); }),
             vscode.commands.registerCommand('catalystops.showGeneratedScript', () => showGeneratedScript()),
             vscode.commands.registerCommand('catalystops.previewDryRunScript', () => previewDryRunScript()),
             vscode.commands.registerCommand('catalystops.previewFullDryRunScript', () => previewFullDryRunScript()),
             vscode.commands.registerCommand('catalystops.showFullDryRunScript', () => showFullDryRunScript()),
             vscode.commands.registerCommand('catalystops.showBillingDashboard',
-                () => showBillingDashboard(context, billingTreeProvider)),
+                () => { trackWalkthroughStep('billing'); return showBillingDashboard(context, billingTreeProvider); }),
             vscode.commands.registerCommand('catalystops.refreshBilling',
                 () => showBillingDashboard(context, billingTreeProvider, undefined, undefined, true)),
             vscode.commands.registerCommand('catalystops.refreshJobs',
@@ -120,7 +125,7 @@ export function activate(context: vscode.ExtensionContext): void {
                     }
                 }),
             vscode.commands.registerCommand('catalystops.analyzeJobRun',
-                (runId: number, jobName: string) => analyzeJobRunCmd(context, issuesTreeProvider, runId, jobName)),
+                (runId: number, jobName: string) => { trackWalkthroughStep('jobs'); return analyzeJobRunCmd(context, issuesTreeProvider, runId, jobName); }),
             vscode.commands.registerCommand('catalystops.jobItemClicked',
                 (runId: number, jobName: string) => {
                     const now = Date.now();
@@ -150,6 +155,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
             // Explain Plan + DAG commands
             vscode.commands.registerCommand('catalystops.showPlanDag', () => {
+                trackWalkthroughStep('explain-plan');
                 const activeDoc = vscode.window.activeTextEditor?.document;
                 const dfMap = activeDoc
                     ? getDataFrameLineMap(activeDoc.uri.toString())

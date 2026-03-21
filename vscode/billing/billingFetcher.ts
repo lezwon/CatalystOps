@@ -253,6 +253,87 @@ export async function fetchBillingRows(
     return parseRows(allRows, columns);
 }
 
+const COST_SQL = (where: string) => `
+SELECT
+    SUM(u.usage_quantity * COALESCE(lp.pricing.default, 0)) AS dollars,
+    SUM(u.usage_quantity)                                    AS dbus
+FROM system.billing.usage u
+LEFT JOIN system.billing.list_prices lp
+    ON  u.sku_name          = lp.sku_name
+    AND u.usage_unit        = lp.usage_unit
+    AND u.usage_start_time >= lp.price_start_time
+    AND (lp.price_end_time IS NULL OR u.usage_start_time < lp.price_end_time)
+WHERE u.record_type = 'ORIGINAL'
+  AND ${where}
+`;
+
+async function runCostQuery(
+    config: DatabricksConnectionConfig,
+    warehouseId: string,
+    where: string,
+): Promise<{ dollars: number; dbus: number } | null> {
+    let result = await submitStatement(config, warehouseId, COST_SQL(where));
+    const state = result.status?.state;
+    if (state === 'FAILED' || state === 'CANCELED' || state === 'CLOSED') { return null; }
+    if (state !== 'SUCCEEDED') {
+        result = await pollStatement(config, result.statement_id, 60_000);
+    }
+    if (result.status?.state !== 'SUCCEEDED') { return null; }
+
+    const row = result.result?.data_array?.[0];
+    if (!row) { return null; }
+
+    const dollars = Number(row[0] ?? 0);
+    const dbus    = Number(row[1] ?? 0);
+    return dollars > 0 || dbus > 0 ? { dollars, dbus } : null;
+}
+
+function toIsoDateFromMs(ms: number): string {
+    return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
+ * Fetch the actual DBU cost for a specific job run from system.billing.usage.
+ *
+ * Strategy:
+ *  1. Exact match on usage_metadata.job_run_id (most precise).
+ *  2. If no data, fall back to job_id + a 3-day window around the run's start
+ *     date (handles workspaces where job_run_id is not populated, and data
+ *     latency of up to ~2 hours).
+ *
+ * Returns null when no data is found in either pass.
+ * Throws on unexpected SQL errors.
+ */
+export async function fetchJobRunCost(
+    config: DatabricksConnectionConfig,
+    runId: number,
+    jobId: number,
+    runStartMs?: number,
+): Promise<{ dollars: number; dbus: number; approximate?: boolean } | null> {
+    const warehouseId = await resolveWarehouseId(config);
+
+    // Pass 1: exact run match via job_run_id
+    const exactWhere = `u.usage_metadata.job_id = '${jobId}'
+  AND TRY_CAST(u.usage_metadata.job_run_id AS BIGINT) = ${runId}`;
+    const exact = await runCostQuery(config, warehouseId, exactWhere);
+    if (exact) { return exact; }
+
+    // Pass 2: job_id + date window fallback (handles missing job_run_id or billing delay)
+    if (runStartMs) {
+        const runDate = toIsoDateFromMs(runStartMs);
+        // Window: 1 day before through 2 days after (billing can lag ~2 hours, crossing midnight)
+        const windowStart = toIsoDateFromMs(runStartMs - 86_400_000);
+        const windowEnd   = toIsoDateFromMs(runStartMs + 2 * 86_400_000);
+        const dateWhere = `u.usage_metadata.job_id = '${jobId}'
+  AND u.usage_date >= '${windowStart}'
+  AND u.usage_date <= '${windowEnd}'`;
+        const approx = await runCostQuery(config, warehouseId, dateWhere);
+        if (approx) { return { ...approx, approximate: true }; }
+    }
+
+    return null;
+}
+
 function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
 }

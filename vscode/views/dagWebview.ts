@@ -7,6 +7,8 @@ import * as vscode from 'vscode';
 import { PlanNode } from '../analysis/planTreeBuilder';
 import { PlanIssue } from '../analysis/planParser';
 import { sendEvent } from '../telemetry';
+import { fetchJobRunCost } from '../billing/billingFetcher';
+import { getConnectionConfig } from '../config/settings';
 
 let currentPanel: vscode.WebviewPanel | undefined;
 
@@ -58,7 +60,7 @@ export function showJobRunDagWebview(
     nodes: PlanNode[],
     planIssues: PlanIssue[],
     jobName: string,
-    run: { state: { life_cycle_state: string; result_state?: string }; durationMs?: number; clusterId?: string },
+    run: { runId: number; jobId: number; startTimeMs: number; state: { life_cycle_state: string; result_state?: string }; durationMs?: number; clusterId?: string },
     sourceContent?: string,
     sourcePath?: string,
     rawPlans?: Array<{ description: string; physicalPlan: string }>,
@@ -73,6 +75,34 @@ export function showJobRunDagWebview(
                 const lang = sourcePath?.endsWith('.py') ? 'python' : 'python';
                 const doc = await vscode.workspace.openTextDocument({ content: sourceContent, language: lang });
                 await vscode.window.showTextDocument(doc, { preview: true, viewColumn: vscode.ViewColumn.One });
+            } else if (msg.type === 'getCost') {
+                const config = getConnectionConfig();
+                if (!config) {
+                    void panel.webview.postMessage({ type: 'costResult', error: 'Databricks not configured.' });
+                    return;
+                }
+                const confirm = await vscode.window.showInformationMessage(
+                    'Fetching run cost queries system.billing.usage via a SQL warehouse. ' +
+                    'If no warehouse is running, one will start automatically — this may take up to 2 minutes and incurs a small SQL compute charge.',
+                    { modal: true },
+                    'Fetch Cost',
+                );
+                if (confirm !== 'Fetch Cost') {
+                    void panel.webview.postMessage({ type: 'costCancelled' });
+                    return;
+                }
+                try {
+                    const cost = await fetchJobRunCost(config, run.runId, run.jobId, run.startTimeMs);
+                    if (cost) {
+                        sendEvent('job_run/cost_fetched', { dollars: String(cost.dollars.toFixed(2)), dbus: String(cost.dbus.toFixed(2)), approximate: String(!!cost.approximate) });
+                        void panel.webview.postMessage({ type: 'costResult', dollars: cost.dollars, dbus: cost.dbus, approximate: cost.approximate ?? false });
+                    } else {
+                        void panel.webview.postMessage({ type: 'costResult', error: 'No billing data found. Billing data can take up to 2 hours to appear — try again later.' });
+                    }
+                } catch (err) {
+                    const msg2 = err instanceof Error ? err.message : String(err);
+                    void panel.webview.postMessage({ type: 'costResult', error: msg2.substring(0, 120) });
+                }
             }
         }, undefined, context.subscriptions);
     };
@@ -198,7 +228,7 @@ function generateJobRunHtml(
     roots: PlanNode[],
     planIssues: PlanIssue[],
     jobName: string,
-    run: { state: { life_cycle_state: string; result_state?: string }; durationMs?: number; clusterId?: string },
+    run: { runId: number; jobId: number; startTimeMs: number; state: { life_cycle_state: string; result_state?: string }; durationMs?: number; clusterId?: string },
     hasSource: boolean,
     rawPlans: Array<{ description: string; physicalPlan: string }>,
 ): string {
@@ -303,12 +333,14 @@ function generateJobRunHtml(
         .verdict { padding: 12px 20px; font-size: 15px; font-weight: bold; border-bottom: 1px solid #2d3748; }
         .meta { padding: 8px 20px; font-size: 12px; color: #718096; border-bottom: 1px solid #2d3748; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
         .meta-text { flex: 1; }
-        .btn-source {
+        .btn-source, .btn-cost {
             padding: 4px 12px; border-radius: 4px; border: 1px solid #4a5568;
             background: #2d3748; color: #a0aec0; font-size: 12px; cursor: pointer;
             white-space: nowrap; flex-shrink: 0;
         }
-        .btn-source:hover { background: #3a4a5c; color: #e2e8f0; border-color: #718096; }
+        .btn-source:hover, .btn-cost:hover { background: #3a4a5c; color: #e2e8f0; border-color: #718096; }
+        .btn-cost:disabled { opacity: 0.5; cursor: default; }
+        #cost-display { font-size: 12px; color: #68d391; white-space: nowrap; }
         .dag-section { padding: 16px 20px; }
         .dag-section h3 { color: #a0aec0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
         .cards-section { padding: 0 20px 20px; }
@@ -374,6 +406,8 @@ function generateJobRunHtml(
     <div class="verdict" style="background:${verdictBg}">${verdictText}</div>
     <div class="meta">
         <span class="meta-text">${escapeHtml(statusText)} &nbsp;|&nbsp; Cluster: ${escapeHtml(clusterText)}</span>
+        <span id="cost-display"></span>
+        <button class="btn-cost" id="btn-cost" onclick="getCost()">💰 Get Cost</button>
         ${hasSource ? `<button class="btn-source" onclick="vscode.postMessage({type:'showSource'})">📄 View Source</button>` : ''}
     </div>
     <div class="dag-section">
@@ -395,7 +429,38 @@ function generateJobRunHtml(
             ).join('\n')}</div>
         </details>
     </div>` : ''}
-    <script>const vscode = acquireVsCodeApi();</script>
+    <script>
+        const vscode = acquireVsCodeApi();
+        function getCost() {
+            const btn = document.getElementById('btn-cost');
+            const display = document.getElementById('cost-display');
+            btn.disabled = true;
+            btn.textContent = '⏳ Fetching…';
+            display.textContent = '';
+            display.style.color = '#a0aec0';
+            vscode.postMessage({ type: 'getCost' });
+        }
+        window.addEventListener('message', event => {
+            const msg = event.data;
+            const btn = document.getElementById('btn-cost');
+            const display = document.getElementById('cost-display');
+            if (msg.type === 'costResult') {
+                btn.style.display = 'none';
+                if (msg.error) {
+                    display.style.color = '#fc8181';
+                    display.textContent = '⚠ ' + msg.error;
+                } else {
+                    display.style.color = '#68d391';
+                    const prefix = msg.approximate ? '~' : '';
+                    const note = msg.approximate ? ' (job total for this day)' : '';
+                    display.textContent = prefix + '$' + msg.dollars.toFixed(2) + ' (' + msg.dbus.toFixed(2) + ' DBUs)' + note;
+                }
+            } else if (msg.type === 'costCancelled') {
+                btn.disabled = false;
+                btn.textContent = '💰 Get Cost';
+            }
+        });
+    </script>
 </body>
 </html>`;
 }

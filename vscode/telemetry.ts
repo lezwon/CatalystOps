@@ -47,6 +47,35 @@ export function sendEvent(
     reporter?.sendTelemetryEvent(eventName, { appName: _appName ?? '', ...properties });
 }
 
+// ── Walkthrough funnel tracking ────────────────────────────────────────────
+
+const WALKTHROUGH_STARTED_KEY      = 'catalystops.walkthrough.started';
+const WALKTHROUGH_STEPS_KEY        = 'catalystops.walkthrough.completedSteps';
+
+/**
+ * Fire once on first-ever activation to mark the top of the walkthrough funnel.
+ * Subsequent activations are no-ops so we measure unique users, not sessions.
+ */
+export function trackWalkthroughStart(): void {
+    if (!_context) { return; }
+    if (_context.globalState.get<boolean>(WALKTHROUGH_STARTED_KEY)) { return; }
+    void _context.globalState.update(WALKTHROUGH_STARTED_KEY, true);
+    sendEvent('walkthrough/started');
+}
+
+/**
+ * Fire once per step per install. Used to build a completion funnel across
+ * walkthrough steps (local-analysis → connect → dry-run → explain-plan →
+ * billing → jobs).
+ */
+export function trackWalkthroughStep(step: string): void {
+    if (!_context) { return; }
+    const completed = _context.globalState.get<string[]>(WALKTHROUGH_STEPS_KEY) ?? [];
+    if (completed.includes(step)) { return; }
+    void _context.globalState.update(WALKTHROUGH_STEPS_KEY, [...completed, step]);
+    sendEvent('walkthrough/step_completed', { step });
+}
+
 /**
  * Nudge users who haven't tried the dry-run feature yet.
  *

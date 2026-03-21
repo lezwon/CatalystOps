@@ -164,6 +164,7 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
                         'to avoid global collection.',
                     costPoints: 65,
                     planLine: trimmed,
+                    tableName: lastScannedTable ?? undefined,
                 });
             } else if (!/Exchange\s+SinglePartition\b/i.test(trimmed)) {
                 issues.push({
@@ -430,6 +431,7 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
                     'Simplify aggregation expressions or flatten complex types before aggregating where possible.',
                 costPoints: 35,
                 planLine: trimmed,
+                tableName: lastScannedTable ?? undefined,
             });
         }
 
@@ -479,6 +481,7 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
                         '  df.withColumn("rn", row_number().over(w))',
                     costPoints: 70,
                     planLine: trimmed,
+                    tableName: lastScannedTable ?? undefined,
                 });
             }
         }
