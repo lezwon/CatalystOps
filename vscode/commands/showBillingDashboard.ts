@@ -9,7 +9,7 @@ import { cacheKey, loadFromCache, saveToCache } from '../billing/billingCache';
 import { BillingTreeDataProvider } from '../views/billingTreeView';
 import { showBillingWebview, restoreBillingWebview } from '../views/billingWebview';
 import { getConnectionConfig } from '../config/settings';
-import { sendEvent } from '../telemetry';
+import { sendEvent, incrementBillingFetchCount } from '../telemetry';
 
 /** Whether the user has already confirmed the SQL warehouse billing notice this session. */
 let billingWarningAcknowledged = false;
@@ -78,6 +78,7 @@ export async function showBillingDashboard(
                 row_count: String(rows.length),
                 duration_ms: String(durationMs),
             });
+            void incrementBillingFetchCount();
         } else {
             sendEvent('billing/cache_hit', { period });
         }

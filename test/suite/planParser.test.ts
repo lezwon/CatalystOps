@@ -263,4 +263,60 @@ FileScan parquet db.events[id#20]
         // Expect exactly one deduplicated entry for db.events
         assert.strictEqual(repeatedScans.length, 1, 'deduplication should produce exactly one RepeatedFileScan for db.events');
     });
+
+    // Partition pruning
+    test('should detect missing partition filter on qualified table (non-formatted plan)', () => {
+        const plan = `
+== Physical Plan ==
+*(1) FileScan delta catalog.sales.orders [id#0L, date#1] Batched: true, DataFilters: [], Format: Delta, Location: DeltaTableFileIndex[], PartitionFilters: [], PushedFilters: [], ReadSchema: struct<id:bigint>
+`;
+        const issues = parsePlan(plan);
+        assert.ok(issues.some(i => i.name === 'MissingPartitionFilter'), 'should detect empty PartitionFilters on qualified table');
+        const issue = issues.find(i => i.name === 'MissingPartitionFilter')!;
+        assert.strictEqual(issue.type, 'pushdown');
+        assert.ok(issue.description.includes('orders'), 'description should mention the table name');
+    });
+
+    test('should detect missing partition filter (formatted plan, PartitionFilters on its own line)', () => {
+        const plan = `
+== Physical Plan ==
+*(1) Scan delta spark_catalog.catalog.sales.orders [id#0L, date#1]
+   Batched: true
+   Location: DeltaTableFileIndex[]
+   PartitionFilters: []
+   PushedFilters: [IsNotNull(id#0L)]
+   ReadSchema: struct<id:bigint,date:string>
+`;
+        const issues = parsePlan(plan);
+        assert.ok(issues.some(i => i.name === 'MissingPartitionFilter'), 'should detect PartitionFilters on separate line');
+    });
+
+    test('should not flag when partition filters are applied', () => {
+        const plan = `
+== Physical Plan ==
+*(1) FileScan delta catalog.sales.orders [id#0L, date#1] Batched: true, Format: Delta, PartitionFilters: [(date#1 >= 2024-01-01)], ReadSchema: struct<id:bigint>
+`;
+        const issues = parsePlan(plan);
+        assert.ok(!issues.some(i => i.name === 'MissingPartitionFilter'), 'non-empty PartitionFilters should not be flagged');
+    });
+
+    test('should not flag PartitionFilters: [] on unqualified table (may not be partitioned)', () => {
+        const plan = `
+== Physical Plan ==
+*(1) FileScan parquet events [id#0L] Batched: true, PartitionFilters: [], ReadSchema: struct<id:bigint>
+`;
+        const issues = parsePlan(plan);
+        assert.ok(!issues.some(i => i.name === 'MissingPartitionFilter'), 'unqualified table name should not be flagged');
+    });
+
+    test('should deduplicate MissingPartitionFilter for same table', () => {
+        const plan = `
+== Physical Plan ==
+*(1) FileScan delta catalog.sales.orders [id#0L] Batched: true, PartitionFilters: [], ReadSchema: struct<id:bigint>
+*(2) FileScan delta catalog.sales.orders [id#1L] Batched: true, PartitionFilters: [], ReadSchema: struct<id:bigint>
+`;
+        const issues = parsePlan(plan);
+        const pruneIssues = issues.filter(i => i.name === 'MissingPartitionFilter' && i.tableName === 'catalog.sales.orders');
+        assert.strictEqual(pruneIssues.length, 1, 'same table should only be flagged once');
+    });
 });

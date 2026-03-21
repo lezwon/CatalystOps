@@ -11,12 +11,16 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod/v4';
 import { analyzeCode } from '../analysis/codeAnalyzer';
-import { getMcpSnapshot } from './mcpState';
+import { getMcpSnapshot, getMcpJobRunSnapshot } from './mcpState';
 import { loadFromCache, cacheKey } from '../billing/billingCache';
 import { computeSummary, dateRangeForPeriod } from '../billing/billingTypes';
 import { getCachedPlanIssues, getCachedResults, onCacheUpdated, onDryRunError } from '../analysis/analysisCache';
 import { logDebug, logError } from '../logger';
 import { Severity } from '../models/types';
+import { getConnectionConfig } from '../config/settings';
+import { listJobs, getLastRun, getRunDetails, getClusterEventLogPath } from '../databricks/jobsApi';
+import { fetchPlansFromEventLog } from '../databricks/eventLogParser';
+import { parsePlan } from '../analysis/planParser';
 
 let _httpServer: http.Server | undefined;
 
@@ -295,6 +299,50 @@ function createMcpServer(context: vscode.ExtensionContext): McpServer {
         },
     );
 
+    // ── Tool: get_last_job_run_analysis ──────────────────────────────────────
+
+    server.tool(
+        'get_last_job_run_analysis',
+        'Returns the plan issues and execution plan from the most recently analyzed Databricks job run in VS Code. Use this to get suggestions and the full physical plan without re-fetching from Databricks.',
+        async () => {
+            const snapshot = getMcpJobRunSnapshot();
+            if (!snapshot) {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: 'No job run analysis available yet. Double-click a job run in the CatalystOps Jobs panel in VS Code to analyze it first.',
+                    }],
+                };
+            }
+
+            const issuesByCost = [...snapshot.planIssues].sort((a, b) => b.costPoints - a.costPoints);
+
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify({
+                        jobName: snapshot.jobName,
+                        runId: snapshot.runId,
+                        analyzedAt: snapshot.updatedAt.toISOString(),
+                        queryCount: snapshot.planEntries.length,
+                        planIssueCount: snapshot.planIssues.length,
+                        planIssues: issuesByCost.map(i => ({
+                            type: i.type,
+                            name: i.name,
+                            description: i.description,
+                            costPoints: i.costPoints,
+                            tableName: i.tableName ?? null,
+                        })),
+                        queries: snapshot.planEntries.slice(0, 10).map(e => ({
+                            description: e.description.substring(0, 120),
+                            physicalPlan: e.physicalPlan.substring(0, 3000),
+                        })),
+                    }, null, 2),
+                }],
+            };
+        },
+    );
+
     // ── Tool: run_dry_run ─────────────────────────────────────────────────────
 
     server.tool(
@@ -356,6 +404,165 @@ function createMcpServer(context: vscode.ExtensionContext): McpServer {
                 return {
                     isError: true,
                     content: [{ type: 'text' as const, text: `Dry run failed: ${err instanceof Error ? err.message : String(err)}` }],
+                };
+            }
+        },
+    );
+
+    // ── Tool: list_job_runs ───────────────────────────────────────────────────
+
+    server.tool(
+        'list_job_runs',
+        'Lists Databricks workspace jobs and their most recent run status, duration, cluster ID, and result. Use the returned runId with get_job_run_plan to inspect a specific run\'s execution plan.',
+        async () => {
+            const config = getConnectionConfig();
+            if (!config) {
+                return {
+                    content: [{ type: 'text' as const, text: 'Databricks not configured. Run "CatalystOps: Configure Connection" in VS Code first.' }],
+                };
+            }
+            try {
+                const jobs = await listJobs(config.host, config.token);
+                const jobsWithRuns = await Promise.all(
+                    jobs.map(async (job) => {
+                        try {
+                            const lastRun = await getLastRun(config.host, config.token, job.jobId);
+                            return { job, lastRun };
+                        } catch {
+                            return { job, lastRun: undefined };
+                        }
+                    }),
+                );
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            jobCount: jobs.length,
+                            jobs: jobsWithRuns.map(({ job, lastRun }) => ({
+                                jobId: job.jobId,
+                                name: job.name,
+                                lastRun: lastRun ? {
+                                    runId: lastRun.runId,
+                                    state: lastRun.state.life_cycle_state,
+                                    result: lastRun.state.result_state ?? null,
+                                    startedAt: lastRun.startTimeMs ? new Date(lastRun.startTimeMs).toISOString() : null,
+                                    durationMs: lastRun.durationMs ?? null,
+                                    clusterId: lastRun.clusterId ?? null,
+                                } : null,
+                            })),
+                        }, null, 2),
+                    }],
+                };
+            } catch (err) {
+                return {
+                    isError: true,
+                    content: [{ type: 'text' as const, text: `Failed to list jobs: ${err instanceof Error ? err.message : String(err)}` }],
+                };
+            }
+        },
+    );
+
+    // ── Tool: get_job_run_plan ─────────────────────────────────────────────────
+
+    server.tool(
+        'get_job_run_plan',
+        'Fetches the Spark execution plans from a historical Databricks job run by reading the cluster event log from DBFS. Returns parsed plan issues (join types, shuffles, missing partition filters, repeated scans) and the raw physical plan text. Use list_job_runs first to get a runId.',
+        { runId: z.number().describe('The Databricks run ID to analyze. Get this from list_job_runs.') },
+        async ({ runId }) => {
+            const config = getConnectionConfig();
+            if (!config) {
+                return {
+                    content: [{ type: 'text' as const, text: 'Databricks not configured. Run "CatalystOps: Configure Connection" in VS Code first.' }],
+                };
+            }
+            try {
+                const run = await getRunDetails(config.host, config.token, runId);
+
+                if (!run.clusterId) {
+                    return {
+                        content: [{
+                            type: 'text' as const,
+                            text: JSON.stringify({
+                                runId,
+                                state: run.state.life_cycle_state,
+                                result: run.state.result_state ?? null,
+                                message: 'Serverless run — event log-based plan analysis is not available. Use run_dry_run on the source file for plan-level analysis.',
+                            }, null, 2),
+                        }],
+                    };
+                }
+
+                const logPath = await getClusterEventLogPath(config.host, config.token, run.clusterId);
+                if (!logPath) {
+                    return {
+                        content: [{
+                            type: 'text' as const,
+                            text: JSON.stringify({
+                                runId,
+                                clusterId: run.clusterId,
+                                message: 'Cluster event logging is not configured. Enable DBFS log delivery in the cluster settings: Advanced options → Logging → Destination: DBFS, Path: dbfs:/cluster-logs.',
+                            }, null, 2),
+                        }],
+                    };
+                }
+
+                const planEntries = await fetchPlansFromEventLog(config.host, config.token, logPath);
+                if (planEntries.length === 0) {
+                    return {
+                        content: [{
+                            type: 'text' as const,
+                            text: JSON.stringify({
+                                runId,
+                                clusterId: run.clusterId,
+                                message: 'No SQL execution plans found in the event log. The job may not have used Spark SQL/DataFrames, or the run may predate when logging was enabled.',
+                            }, null, 2),
+                        }],
+                    };
+                }
+
+                // Parse and deduplicate plan issues across all queries
+                const seenKeys = new Set<string>();
+                const allPlanIssues = planEntries
+                    .flatMap(entry => parsePlan(entry.physicalPlan))
+                    .filter(pi => {
+                        const key = `${pi.name}:${pi.tableName ?? ''}`;
+                        if (seenKeys.has(key)) { return false; }
+                        seenKeys.add(key);
+                        return true;
+                    });
+
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            runId,
+                            jobId: run.jobId,
+                            state: run.state.life_cycle_state,
+                            result: run.state.result_state ?? null,
+                            startedAt: run.startTimeMs ? new Date(run.startTimeMs).toISOString() : null,
+                            durationMs: run.durationMs ?? null,
+                            clusterId: run.clusterId,
+                            queryCount: planEntries.length,
+                            planIssueCount: allPlanIssues.length,
+                            planIssues: allPlanIssues.map(i => ({
+                                type: i.type,
+                                name: i.name,
+                                description: i.description,
+                                costPoints: i.costPoints,
+                                tableName: i.tableName ?? null,
+                            })),
+                            queries: planEntries.slice(0, 10).map(e => ({
+                                executionId: e.executionId,
+                                description: e.description.substring(0, 120),
+                                physicalPlan: e.physicalPlan.substring(0, 3000),
+                            })),
+                        }, null, 2),
+                    }],
+                };
+            } catch (err) {
+                return {
+                    isError: true,
+                    content: [{ type: 'text' as const, text: `Failed to fetch job run plan: ${err instanceof Error ? err.message : String(err)}` }],
                 };
             }
         },

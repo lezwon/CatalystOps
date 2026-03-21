@@ -2,6 +2,50 @@
 
 All notable changes to CatalystOps are documented here.
 
+## [0.9.0]
+
+### Added
+- **Improved job run DAG view** — the plan tree now renders as an interactive HTML tree with `└─` / `├─` connectors, query groups collapsed into accordions with execution counts, human-friendly filter conditions (`col not null`, `a and b`), a **View Source** button to open the originating notebook, and a collapsible Raw Plans section for debugging.
+- **3 new plan-level issue detectors:**
+  - `SinglePartitionBottleneck` — flags `Exchange SinglePartition`, which collects all data to a single executor (caused by global aggregation or global window).
+  - `SortAggregate` — flags sort-based aggregation, which is slower than hash-based and prone to spilling on large datasets.
+  - `GlobalWindow` via `RunningWindowFunction` — extends the existing global-window check to cover Databricks Photon's `RunningWindowFunction` operator.
+- **Plan parser: AQE Initial Plan analysis** — plans whose operator tree sits entirely under `== Initial Plan ==` (AQE has not yet resolved a final plan) are now analysed instead of being silently skipped.
+- **MCP: `get_last_job_run_analysis` tool** — exposes the most recent job run's plan issues and physical plan text to Claude without re-fetching from Databricks.
+
+---
+
+## [0.8.3]
+
+### Added
+- **Jobs sidebar** — new Jobs tree view lists all Databricks jobs with their last-run status. Click any job to trigger historical run analysis without re-executing it.
+- **Historical job run analysis** — reads Spark event logs from DBFS to extract physical plans and surface plan issues and code diagnostics from a past run. Opens a markdown report in a new editor tab (`CatalystOps: Analyze Job Run`).
+- **SSH tunnel execution mode** — run dry-run analysis directly on a Databricks cluster driver over SSH. Enable via `catalystops.connection.sshTunnel.enabled` + `catalystops.connection.sshTunnel.connectionName`. Requires Databricks CLI ≥ 0.269 and DBR 17+.
+- **Marketplace rating prompt** — shown after 5 sessions or 2 billing data fetches (max 2 times, permanently dismissible).
+- **4 new static analysis rules:**
+  - `CODE_ITER_COLLECT_001` (Critical) — detects `for row in df.collect()` patterns that pull the full dataset to the driver and iterate row-by-row.
+  - `CODE_REPARTITION_WRITE_001` (Warning) — detects `.repartition(N)` immediately before a write, where `.coalesce()` avoids the full shuffle.
+  - `CODE_UDF_FILTER_001` (Warning) — detects Python UDFs inside `.filter()` that block predicate pushdown on partitioned/Delta tables.
+  - `CODE_REPEATED_ACTIONS_001` (Warning) — detects multiple Spark actions (`.count()`, `.show()`, etc.) on the same DataFrame within 50 lines without an intervening `.cache()`.
+- **Plan parser: missing partition filter detection** — flags `PartitionFilters: []` on qualified table scans, indicating every partition will be read with no pruning.
+- **Plan parser: additional scan pattern** — `Scan parquet/delta ...` node format (in addition to `FileScan`/`PhotonScan`) now correctly extracts table names for downstream detectors.
+- **Telemetry: error classification** — dry run errors are now categorised (import error, syntax error, Spark analysis error, auth, timeout, OOM, network) before sending, so no raw code or stack traces are transmitted.
+- **Telemetry: execution mode tracking** — `analyze_cost_mode` event records which execution mode (cluster / serverless / ssh) was used per dry run.
+- **Telemetry: failure duration** — `analysis/failed` event now includes `durationMs` for latency tracking.
+
+### Changed
+- **License** — switched from MIT to [Elastic License 2.0 (ELv2)](https://www.elastic.co/licensing/elastic-license). Source remains publicly available; hosting or redistributing the extension as a competing product or managed service is not permitted.
+- **Feedback toast** — now triggers after 100 successful local analyses (previously after a 5-second timer on first file open), preventing premature prompts for new users.
+- **Feedback toast placement** — moved to fire after `runLocalAnalysis` completes rather than on editor switch, so it only appears after a real analysis result.
+
+### Fixed
+- **Quick-fix commands** — broadcast hint, repartition, persist, and add-join-condition quick fixes now guard against out-of-bounds source line numbers before attempting editor edits.
+- **Persist quick fix** — `insertLine` is now clamped to `document.lineCount` to avoid inserting past the end of the file.
+- **Diagnostics range** — `setCodeIssueDiagnostics` now clamps all range coordinates to `≥ 0`, preventing VS Code from throwing on negative line/column values.
+- **Result mapper** — `resolveLocation` now clamps parsed line numbers to `≥ 0` via `Math.max(0, ...)`.
+
+---
+
 ## [0.8.1]
 
 ### Added

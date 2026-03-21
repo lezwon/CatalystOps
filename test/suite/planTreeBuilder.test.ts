@@ -47,7 +47,7 @@ suite('Plan Tree Builder', () => {
         const roots = buildPlanTrees(results, [], new Map());
 
         assert.strictEqual(roots.length, 1, 'Should have 1 root node');
-        assert.strictEqual(roots[0].operatorName, 'FileScan');
+        assert.strictEqual(roots[0].operatorName, 'Read: table');
         assert.strictEqual(roots[0].children.length, 0);
         assert.strictEqual(roots[0].depth, 0);
     });
@@ -66,17 +66,17 @@ suite('Plan Tree Builder', () => {
 
         assert.strictEqual(roots.length, 1, 'Should have 1 root');
         const root = roots[0];
-        assert.strictEqual(root.operatorName, 'SortMergeJoin');
+        assert.strictEqual(root.operatorName, 'Sort-Merge Join');
         assert.strictEqual(root.depth, 0);
-        assert.strictEqual(root.children.length, 2, 'SortMergeJoin should have 2 Sort children');
+        assert.strictEqual(root.children.length, 2, 'Sort-Merge Join should have 2 Sort children');
 
         const [leftSort, rightSort] = root.children;
         assert.strictEqual(leftSort.operatorName, 'Sort');
         assert.strictEqual(leftSort.depth, 1);
-        assert.strictEqual(leftSort.children.length, 1, 'Sort should have Exchange child');
+        assert.strictEqual(leftSort.children.length, 1, 'Sort should have Shuffle child');
 
         const leftExchange = leftSort.children[0];
-        assert.strictEqual(leftExchange.operatorName, 'Exchange');
+        assert.strictEqual(leftExchange.operatorName, 'Shuffle');
         assert.strictEqual(leftExchange.depth, 2);
         assert.strictEqual(leftExchange.children.length, 1);
 
@@ -138,7 +138,9 @@ SortMergeJoin [id#10], [id#20], Inner
         // Should only parse AdaptiveSparkPlan root, not SortMergeJoin from Initial Plan
         assert.ok(roots.length > 0, 'Should have root nodes');
         const allOps = getAllOperators(roots);
-        const hasSortMergeJoin = allOps.some(op => op === 'SortMergeJoin');
+        // Initial Plan section is excluded — its SortMergeJoin must not appear
+        // (friendly name would be 'Sort-Merge Join', not 'SortMergeJoin')
+        const hasSortMergeJoin = allOps.some(op => op === 'Sort-Merge Join');
         assert.ok(!hasSortMergeJoin, 'Initial Plan SortMergeJoin should not appear in results');
     });
 

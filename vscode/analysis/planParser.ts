@@ -5,7 +5,7 @@
 import { AnalysisResult, ClusterInfo } from '../models/types';
 
 export interface PlanIssue {
-    type: 'join' | 'shuffle' | 'statistics' | 'pushdown' | 'cache' | 'format' | 'partition' | 'aggregation';
+    type: 'join' | 'shuffle' | 'statistics' | 'pushdown' | 'cache' | 'format' | 'partition' | 'aggregation' | 'window' | 'union';
     name: string;
     description: string;
     costPoints: number;
@@ -25,17 +25,27 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
     // State for multi-line context detection
     const seenInMemoryKeys = new Set<string>();
     const seenFileScanPaths = new Map<string, number>();
+    const seenDedupeKeys = new Set<string>();
 
     // AQE plans contain both "== Final Plan ==" and "== Initial Plan ==" sections.
     // FileScan nodes appear in both, which causes false-positive RepeatedFileScan.
-    // Only analyse the Final Plan (or non-AQE plan) — skip everything after Initial Plan header.
+    //
+    // Skip the Initial Plan section only when there is real operator content (scans, joins,
+    // exchanges, aggregates) before the == Initial Plan == marker — this means a resolved final
+    // plan is present. If the plan only has a wrapper node (AdaptiveSparkPlan) before the marker,
+    // or no Initial Plan marker at all, treat the Initial Plan as the real plan to analyse.
+    const initialPlanStart = planText.search(/==\s*Initial Plan\s*==/i);
+    const hasFinalPlan = initialPlanStart > -1
+        ? /(?:FileScan|PhotonScan|\bScan\s+(?:parquet|delta|orc|json|csv)\b|SortMergeJoin|BroadcastHashJoin|BroadcastNestedLoopJoin|Exchange\b|HashAggregate|SortAggregate)/i
+            .test(planText.substring(0, initialPlanStart))
+        : false;
     let inInitialPlan = false;
 
     for (let i = 0; i < lines.length; i++) {
         const trimmed = lines[i].trim();
 
         if (/==\s*Initial Plan\s*==/i.test(trimmed)) { inInitialPlan = true; }
-        if (inInitialPlan) { continue; }
+        if (inInitialPlan && hasFinalPlan) { continue; }
 
         // ── Join type detection ────────────────────────────────────────────────
 
@@ -118,13 +128,18 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
             });
 
         } else if (/BroadcastNestedLoopJoin/i.test(trimmed)) {
+            const isCross = /\bCross\b/i.test(trimmed);
             issues.push({
                 type: 'join',
-                name: 'BroadcastNestedLoopJoin',
-                description:
-                    'Broadcast nested loop join detected. This is expensive for large datasets — ' +
-                    'add join keys to allow a hash or sort-merge join instead.',
-                costPoints: 80,
+                name: isCross ? 'CrossJoin' : 'BroadcastNestedLoopJoin',
+                description: isCross
+                    ? 'Cross join (BroadcastNestedLoopJoin Cross) detected — this produces a full cartesian product. ' +
+                      'Every row from the left side is paired with every row from the right side, resulting in O(n×m) rows. ' +
+                      'If a join relationship exists, replace with an equi-join: df1.join(df2, "join_key"). ' +
+                      'If intentional, ensure both sides are very small and consider adding .hint("broadcast") explicitly.'
+                    : 'Broadcast nested loop join detected. This is expensive for large datasets — ' +
+                      'add join keys to allow a hash or sort-merge join instead.',
+                costPoints: isCross ? 500 : 80,
                 planLine: trimmed,
             });
         }
@@ -133,13 +148,32 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
 
         if ((/\bExchange\b/i.test(trimmed) && !/BroadcastExchange/i.test(trimmed)) ||
             /PhotonShuffleExchange(?:Sink|Source)/i.test(trimmed)) {
-            issues.push({
-                type: 'shuffle',
-                name: 'Exchange',
-                description: 'Shuffle exchange: data is being redistributed across partitions.',
-                costPoints: 20,
-                planLine: trimmed,
-            });
+
+            if (/Exchange\s+SinglePartition\b/i.test(trimmed) && !seenDedupeKeys.has('single-partition')) {
+                // SinglePartition forces all data to one executor — major bottleneck.
+                // Only emit once per plan; often caused by a global aggregate or global window.
+                seenDedupeKeys.add('single-partition');
+                issues.push({
+                    type: 'shuffle',
+                    name: 'SinglePartitionBottleneck',
+                    description:
+                        'Exchange SinglePartition detected: all data is being collected to a single executor. ' +
+                        'This eliminates parallelism and is a severe bottleneck on large datasets. ' +
+                        'Common causes: global aggregation (no GROUP BY), global window (no PARTITION BY), ' +
+                        'or a scalar subquery. Add a PARTITION BY / GROUP BY key, or restructure the query ' +
+                        'to avoid global collection.',
+                    costPoints: 65,
+                    planLine: trimmed,
+                });
+            } else if (!/Exchange\s+SinglePartition\b/i.test(trimmed)) {
+                issues.push({
+                    type: 'shuffle',
+                    name: 'Exchange',
+                    description: 'Shuffle exchange: data is being redistributed across partitions.',
+                    costPoints: 20,
+                    planLine: trimmed,
+                });
+            }
 
             // Too few shuffle partitions for the data volume
             const partsMatch = trimmed.match(/hashpartitioning\([^)]+,\s*(\d+)\)/i);
@@ -196,11 +230,43 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
 
         // ── Table name extraction (used by RepeatedFileScan and other detectors) ─
 
-        const fileScanMatch = trimmed.match(/(?:FileScan|PhotonScan)\s+(?:parquet|delta|orc|json|csv)\s+([\w.]+)/i);
+        const fileScanMatch = trimmed.match(/(?:FileScan|PhotonScan)\s+(?:parquet|delta|orc|json|csv)\s+([\w.]+)/i)
+            || trimmed.match(/\bScan\s+(?:parquet|delta|orc|json|csv)\s+([\w.]+(?:\.[\w]+)*)/i);
         const hiveScanMatch = trimmed.match(/HiveTableScan\s+.*?\s+([\w.]+)/i);
         const scannedTable = fileScanMatch?.[1] || hiveScanMatch?.[1];
         if (scannedTable) {
             lastScannedTable = scannedTable;
+        }
+
+        // ── Partition pruning: PartitionFilters: [] on a named table scan ─────
+        // An empty PartitionFilters on a qualified table (schema.table or catalog.schema.table)
+        // means Spark is reading every partition — no filter was pushed to the storage layer.
+        // Only flag qualified table names (not raw paths) to reduce false positives on
+        // non-partitioned tables.
+
+        if (/PartitionFilters:\s*\[\s*\]/i.test(trimmed)) {
+            // Associate with the table seen on this line (non-formatted explain) or the most
+            // recent FileScan line (formatted explain where PartitionFilters is on its own line).
+            const tableForFilter = scannedTable ?? lastScannedTable;
+            if (tableForFilter && tableForFilter.includes('.')) {
+                const seenKey = `partition-prune:${tableForFilter}`;
+                if (!seenDedupeKeys.has(seenKey)) {
+                    seenDedupeKeys.add(seenKey);
+                    const shortName = tableForFilter.split('.').slice(-1)[0];
+                    issues.push({
+                        type: 'pushdown',
+                        name: 'MissingPartitionFilter',
+                        description:
+                            `No partition filter is applied to "${shortName}". ` +
+                            'If this table is partitioned, every partition will be scanned — ' +
+                            'add a filter on the partition column (e.g. date, region) to skip irrelevant files. ' +
+                            'On large partitioned tables this can reduce scan cost by 10–1000×.',
+                        costPoints: 60,
+                        planLine: trimmed,
+                        tableName: tableForFilter,
+                    });
+                }
+            }
         }
 
         // ── InMemoryRelation: cache size and re-scan detection ─────────────────
@@ -346,6 +412,104 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
             });
         }
 
+        // ── SortAggregate (spill risk, no hash aggregation) ───────────────────
+        // SortAggregate is chosen when data types don't support hash-based aggregation
+        // (e.g. complex types, certain UDAFs). It requires sorting the full input —
+        // much slower than HashAggregate and prone to spill on large datasets.
+
+        if (/\bSortAggregate\b/i.test(trimmed) && !seenDedupeKeys.has('sort-aggregate')) {
+            seenDedupeKeys.add('sort-aggregate');
+            issues.push({
+                type: 'aggregation',
+                name: 'SortAggregate',
+                description:
+                    'SortAggregate detected instead of HashAggregate. ' +
+                    'SortAggregate must sort the full input before aggregating — it is significantly slower ' +
+                    'than HashAggregate and more prone to spilling to disk on large datasets. ' +
+                    'This is often caused by complex data types (arrays, maps, structs) or certain UDAFs. ' +
+                    'Simplify aggregation expressions or flatten complex types before aggregating where possible.',
+                costPoints: 35,
+                planLine: trimmed,
+            });
+        }
+
+        // ── Global Window (no PARTITION BY) ───────────────────────────────────
+        // Detect Window operators whose windowspecdefinition has no partition columns.
+        // In Spark's plan, a partitioned window looks like:
+        //   windowspecdefinition(partition_col, order_col ASC NULLS LAST, specifiedwindowframe(...))
+        // A global window starts directly with an ordering spec or the frame:
+        //   windowspecdefinition(order_col ASC NULLS LAST, specifiedwindowframe(...))
+
+        if (/\bWindow\s+\[/i.test(trimmed) || /\bRunningWindowFunction\b/i.test(trimmed)) {
+            let isGlobal = false;
+
+            if (/\bRunningWindowFunction\b/i.test(trimmed)) {
+                // RunningWindowFunction computes over pre-sorted data. Check windowspecdefinition
+                // on this line for partition columns; if absent, look ahead for Exchange SinglePartition
+                // which is Spark's signal that all data must be collected to one executor (global window).
+                const wsdMatch = trimmed.match(/windowspecdefinition\(([^)]+)\)/i);
+                if (wsdMatch) {
+                    const firstArg = wsdMatch[1].split(',')[0].trim();
+                    isGlobal = /\b(ASC|DESC)\b/i.test(firstArg) || /^specifiedwindowframe/i.test(firstArg);
+                } else {
+                    // No windowspecdefinition on this line — look ahead within 30 lines for SinglePartition.
+                    const lookahead = lines.slice(i + 1, Math.min(i + 30, lines.length)).join('\n');
+                    isGlobal = /Exchange\s+SinglePartition\b/i.test(lookahead);
+                }
+            } else {
+                const wsdMatch = trimmed.match(/windowspecdefinition\(([^)]+)\)/i);
+                if (wsdMatch) {
+                    const firstArg = wsdMatch[1].split(',')[0].trim();
+                    // If the first argument contains ASC/DESC it's an ordering spec, not a partition column
+                    isGlobal = /\b(ASC|DESC)\b/i.test(firstArg) || /^specifiedwindowframe/i.test(firstArg);
+                }
+            }
+
+            if (isGlobal && !seenDedupeKeys.has('global-window')) {
+                seenDedupeKeys.add('global-window');
+                issues.push({
+                    type: 'window',
+                    name: 'GlobalWindow',
+                    description:
+                        'Window function with no PARTITION BY detected. All data must be collected into a single ' +
+                        'partition for the window computation — this eliminates parallelism and is a severe bottleneck ' +
+                        'on large datasets. Add a PARTITION BY column to distribute the work:\n' +
+                        '  from pyspark.sql.window import Window\n' +
+                        '  w = Window.partitionBy("user_id").orderBy("event_time")\n' +
+                        '  df.withColumn("rn", row_number().over(w))',
+                    costPoints: 70,
+                    planLine: trimmed,
+                });
+            }
+        }
+
+        // ── Union schema mismatch → suggest unionByName ───────────────────────
+        // When df1.union(df2) is called with different column orders, Spark wraps one
+        // side in a Project that reorders columns (e.g. col2#5 AS col1#6). This is
+        // silent data corruption — col values end up in the wrong fields.
+        // Signal: Union node followed by a Project with column aliasing (x AS y).
+
+        if (/^\s*\+?[-|: ]*Union\b/i.test(trimmed) && !seenDedupeKeys.has('union-schema-mismatch')) {
+            const lookahead = lines.slice(i + 1, Math.min(i + 25, lines.length)).join('\n');
+            // Column aliasing: an attribute ref followed by AS and another ref
+            if (/\w+#\d+L?\s+AS\s+\w+#\d+/i.test(lookahead)) {
+                seenDedupeKeys.add('union-schema-mismatch');
+                issues.push({
+                    type: 'union',
+                    name: 'UnionSchemaMismatch',
+                    description:
+                        'Union with implicit column reordering detected. Spark is matching columns by position, ' +
+                        'not by name — if the schemas differ between DataFrames this silently writes data into ' +
+                        'the wrong columns (data corruption). Use unionByName() to align columns by name:\n' +
+                        '  df1.unionByName(df2)\n' +
+                        '  # To handle extra columns in either side:\n' +
+                        '  df1.unionByName(df2, allowMissingColumns=True)',
+                    costPoints: 75,
+                    planLine: trimmed,
+                });
+            }
+        }
+
         // ── Repeated FileScan → suggest caching ───────────────────────────────
 
         const fileScanPath = extractFileScanPath(trimmed);
@@ -394,10 +558,78 @@ export function parsePlan(planText: string, cluster?: ClusterInfo): PlanIssue[] 
         }
     }
 
+    // ── Optimizer Statistics: missing table stats ──────────────────────────────
+    // Parse the "== Optimizer Statistics ==" section for tables without stats.
+    const missingStatsIssue = extractMissingStatsIssue(planText);
+    if (missingStatsIssue) { issues.push(missingStatsIssue); }
+
     return issues;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
+
+/**
+ * Extract a MissingTableStatistics issue from the "== Optimizer Statistics ==" section.
+ * Handles two common formats:
+ *   - `missing = table1, table2, table3`  (Databricks explain output)
+ *   - Row-based table where values show "missing" or "Statistics: Not Available"
+ */
+function extractMissingStatsIssue(planText: string): PlanIssue | null {
+    // Locate the section — it ends at the next == section or EOF
+    const sectionMatch = planText.match(/==\s*Optimizer Statistics\s*==\s*([\s\S]*?)(?:(?:==\s*\w)|$)/i);
+    if (!sectionMatch) { return null; }
+
+    const section = sectionMatch[1];
+    const missingTables = new Set<string>();
+
+    // Format 1: `missing = table1, table2` (Databricks formatted explain)
+    for (const line of section.split('\n')) {
+        const m = line.match(/missing\s*=\s*(.+)/i);
+        if (m) {
+            m[1].split(',').map(t => t.trim()).filter(Boolean).forEach(t => missingTables.add(t));
+        }
+    }
+
+    // Format 2: table rows with "missing" values (tabular output)
+    // Match lines like: | customer      | missing | missing |
+    if (missingTables.size === 0) {
+        for (const line of section.split('\n')) {
+            if (/\|\s*missing\s*\|/i.test(line)) {
+                const namePart = line.match(/\|\s*([\w.]+)\s*\|/);
+                if (namePart) { missingTables.add(namePart[1]); }
+            }
+        }
+    }
+
+    // Format 3: "Relation: ... Statistics: Not Available"
+    if (missingTables.size === 0) {
+        for (const line of section.split('\n')) {
+            if (/Statistics:\s*Not Available/i.test(line)) {
+                const relMatch = line.match(/Relation:\s*([\w.]+)/i);
+                if (relMatch) { missingTables.add(relMatch[1]); }
+            }
+        }
+    }
+
+    if (missingTables.size === 0) { return null; }
+
+    const tableList = Array.from(missingTables).join(', ');
+    const analyzeStmts = Array.from(missingTables)
+        .map(t => `ANALYZE TABLE ${t} COMPUTE STATISTICS FOR ALL COLUMNS;`)
+        .join('\n');
+
+    return {
+        type: 'statistics',
+        name: 'MissingTableStatistics',
+        description:
+            `Optimizer statistics are missing for: ${tableList}. ` +
+            'Without row counts and column statistics, the query optimizer cannot accurately estimate ' +
+            'join order, broadcast thresholds, or shuffle partition sizes — leading to suboptimal plans. Run:\n' +
+            analyzeStmts,
+        costPoints: 50,
+        tableName: Array.from(missingTables)[0],
+    };
+}
 
 /** Parse a "sizeInBytes=X Unit" string from plan text into bytes. */
 function parseSizeBytes(text: string): number | null {
@@ -474,7 +706,11 @@ function extractFileScanPath(trimmed: string): string | null {
     const tableMatch = trimmed.match(/(?:FileScan|PhotonScan)\s+\w+\s+([\w.]+)\s*\[/i);
     if (tableMatch) { return tableMatch[1]; }
 
-    // Format 2: FileScan csv [/path/to/file.csv, ...][columns...]
+    // Format 2: AQE numbered format — "Scan parquet schema.table (N)" or "*(N) Scan parquet schema.table"
+    const aqeScanMatch = trimmed.match(/\bScan\s+(?:parquet|delta|orc|json|csv)\s+([\w.]+)/i);
+    if (aqeScanMatch) { return aqeScanMatch[1]; }
+
+    // Format 3: FileScan csv [/path/to/file.csv, ...][columns...]
     const pathMatch = trimmed.match(/(?:FileScan|PhotonScan)\s+\w+\s+\[([^[\]]+)\]/i);
     if (pathMatch) {
         const first = pathMatch[1].split(',')[0].trim().replace(/^file:/i, '');
@@ -517,10 +753,12 @@ export function parseLogicalPlan(planText: string): PlanIssue[] {
             const shortName = name.split('.').slice(-1)[0];
             issues.push({
                 type: 'cache',
-                name: 'RepeatedFileScan',
+                name: 'RepeatedTableScan',
                 description:
-                    `Table "${shortName}" is read ${count}+ times without caching. ` +
-                    'Each reference triggers a separate scan. Cache after the first read to reuse the result.',
+                    `"${shortName}" is scanned multiple times without caching. ` +
+                    'Each reference triggers a separate storage read. Cache after the first read:\n' +
+                    `  ${shortName} = spark.table("${name}").cache()\n` +
+                    `  # Reuse the cached variable instead of re-reading "${name}"`,
                 costPoints: 40,
                 planLine: trimmed,
                 tableName: name,
@@ -566,13 +804,19 @@ function detectCrossPlanRepeatedScans(results: AnalysisResult[]): PlanIssue[] {
         if (!result.executionPlan?.physicalPlan) { continue; }
         const lines = result.executionPlan.physicalPlan.split('\n');
 
+        const planTxt = result.executionPlan.physicalPlan;
+        const initIdx = planTxt.search(/==\s*Initial Plan\s*==/i);
+        const hasFinalPlanLocal = initIdx > -1
+            ? /(?:FileScan|PhotonScan|\bScan\s+(?:parquet|delta|orc|json|csv)\b|SortMergeJoin|BroadcastHashJoin|Exchange\b|HashAggregate|SortAggregate)/i
+                .test(planTxt.substring(0, initIdx))
+            : false;
         let inInitialPlan = false;
         const seenInThisPlan = new Set<string>();
 
         for (let i = 0; i < lines.length; i++) {
             const trimmed = lines[i].trim();
             if (/==\s*Initial Plan\s*==/i.test(trimmed)) { inInitialPlan = true; }
-            if (inInitialPlan) { continue; }
+            if (inInitialPlan && hasFinalPlanLocal) { continue; }
 
             const path = extractFileScanPath(trimmed);
             if (!path || seenInThisPlan.has(path)) { continue; }

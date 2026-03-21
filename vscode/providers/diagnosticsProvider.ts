@@ -22,12 +22,11 @@ export function getDiagnosticCollection(): vscode.DiagnosticCollection {
  */
 export function setCodeIssueDiagnostics(uri: vscode.Uri, issues: CodeIssue[]): void {
     const diagnostics = issues.map(issue => {
-        const range = new vscode.Range(
-            issue.line,
-            issue.column,
-            issue.endLine ?? issue.line,
-            issue.endColumn ?? issue.column + 1,
-        );
+        const startLine = Math.max(0, issue.line);
+        const startCol  = Math.max(0, issue.column);
+        const endLine   = Math.max(startLine, issue.endLine ?? startLine);
+        const endCol    = Math.max(0, issue.endColumn ?? startCol + 1);
+        const range = new vscode.Range(startLine, startCol, endLine, endCol);
 
         const diagnostic = new vscode.Diagnostic(
             range,

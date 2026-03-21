@@ -9,15 +9,29 @@ const INSTRUMENTATION_CONNECTION_STRING = 'InstrumentationKey=c2a13996-87aa-4c32
 const FEEDBACK_FORM_URL = 'https://tinyurl.com/catalystopssurvey';
 
 const FEEDBACK_SHOWN_KEY = 'catalystops.feedbackShown';
+const LOCAL_ANALYSIS_COUNT_KEY = 'catalystops.localAnalysisCount';
+const FEEDBACK_ANALYSIS_THRESHOLD = 100;
 const DRY_RUN_NUDGE_SHOWN_KEY = 'catalystops.dryRunNudgeShown';
 const DRY_RUN_NUDGE_SCAN_COUNT_KEY = 'catalystops.dryRunNudgeScanCount';
 export const HAS_USED_DRY_RUN_KEY = 'catalystops.hasUsedDryRun';
 
 const DRY_RUN_NUDGE_SCAN_THRESHOLD = 3;
 
+// Rating prompt keys
+const RATING_DISMISSED_KEY       = 'catalystops.rating.dismissed';
+const RATING_ACTION_TAKEN_KEY    = 'catalystops.rating.actionTaken';
+const RATING_SHOW_COUNT_KEY      = 'catalystops.rating.showCount';
+const RATING_SESSION_COUNT_KEY   = 'catalystops.rating.sessionCount';
+const RATING_BILLING_FETCH_KEY   = 'catalystops.rating.billingFetchCount';
+
+const RATING_SESSION_THRESHOLD  = 5;
+const RATING_BILLING_THRESHOLD  = 2;
+const RATING_MAX_SHOWS          = 2;
+
+const MARKETPLACE_URL = 'https://marketplace.visualstudio.com/items?itemName=CatalystOps.catalystops&ssr=false#review-details';
+
 let reporter: TelemetryReporter | undefined;
 let _context: vscode.ExtensionContext | undefined;
-let _feedbackTimerSet = false;
 
 export function initTelemetry(context: vscode.ExtensionContext): void {
     reporter = new TelemetryReporter(INSTRUMENTATION_CONNECTION_STRING);
@@ -73,18 +87,90 @@ export async function maybeShowDryRunNudge(issueCount: number): Promise<void> {
 }
 
 /**
- * Schedule a feedback toast 5 seconds after the first file is analyzed.
+ * Increment the session count and maybe show the rating prompt.
+ * Call once per activation (i.e., each VS Code session).
+ */
+export async function incrementSessionCount(): Promise<void> {
+    if (!_context) { return; }
+    const count = (_context.globalState.get<number>(RATING_SESSION_COUNT_KEY) ?? 0) + 1;
+    await _context.globalState.update(RATING_SESSION_COUNT_KEY, count);
+    if (count >= RATING_SESSION_THRESHOLD) {
+        void maybeShowRatingPrompt('sessions');
+    }
+}
+
+/**
+ * Increment the billing fetch counter and maybe show the rating prompt.
+ * Call after each successful billing data fetch.
+ */
+export async function incrementBillingFetchCount(): Promise<void> {
+    if (!_context) { return; }
+    const count = (_context.globalState.get<number>(RATING_BILLING_FETCH_KEY) ?? 0) + 1;
+    await _context.globalState.update(RATING_BILLING_FETCH_KEY, count);
+    if (count >= RATING_BILLING_THRESHOLD) {
+        void maybeShowRatingPrompt('billing');
+    }
+}
+
+/**
+ * Show a marketplace rating prompt if conditions are met.
+ *
+ * Guards:
+ * - Never show if user already rated/dismissed permanently
+ * - Never show more than RATING_MAX_SHOWS times total
+ * - Only show when triggered by a meaningful action (dry_run | sessions | billing)
+ */
+export async function maybeShowRatingPrompt(trigger: string): Promise<void> {
+    if (!_context) { return; }
+
+    if (_context.globalState.get<boolean>(RATING_DISMISSED_KEY)) { return; }
+    if (_context.globalState.get<boolean>(RATING_ACTION_TAKEN_KEY)) { return; }
+
+    const showCount = _context.globalState.get<number>(RATING_SHOW_COUNT_KEY) ?? 0;
+    if (showCount >= RATING_MAX_SHOWS) { return; }
+
+    await _context.globalState.update(RATING_SHOW_COUNT_KEY, showCount + 1);
+    sendEvent('rating/shown', { trigger, showCount: String(showCount + 1) });
+
+    const choice = await vscode.window.showInformationMessage(
+        'Enjoying CatalystOps? A review on the Marketplace helps other Spark developers find it.',
+        'Rate ★★★★★',
+        'Maybe later',
+        'Don\'t ask again',
+    );
+
+    if (choice === 'Rate ★★★★★') {
+        await _context.globalState.update(RATING_ACTION_TAKEN_KEY, true);
+        sendEvent('rating/clicked', { trigger });
+        vscode.env.openExternal(vscode.Uri.parse(MARKETPLACE_URL));
+    } else if (choice === 'Don\'t ask again') {
+        await _context.globalState.update(RATING_DISMISSED_KEY, true);
+        sendEvent('rating/dismissed', { trigger, action: 'permanent' });
+    } else {
+        // undefined (toast closed) or 'Maybe later'
+        sendEvent('rating/dismissed', { trigger, action: choice === 'Maybe later' ? 'later' : 'closed' });
+    }
+}
+
+/**
+ * Increment the local analysis counter and show a feedback toast once the
+ * user has completed FEEDBACK_ANALYSIS_THRESHOLD successful local analyses.
  * Only fires once per install (persisted via globalState).
  */
-export function maybeShowFeedbackToast(): void {
+export async function maybeShowFeedbackToast(): Promise<void> {
     if (!_context) { return; }
-    if (_feedbackTimerSet) { return; }
     if (_context.globalState.get<boolean>(FEEDBACK_SHOWN_KEY)) { return; }
 
-    _feedbackTimerSet = true;
+    const count = (_context.globalState.get<number>(LOCAL_ANALYSIS_COUNT_KEY) ?? 0) + 1;
+    await _context.globalState.update(LOCAL_ANALYSIS_COUNT_KEY, count);
+    if (count < FEEDBACK_ANALYSIS_THRESHOLD) { return; }
+
+    // Mark shown immediately so concurrent calls don't double-fire
+    await _context.globalState.update(FEEDBACK_SHOWN_KEY, true);
+
     setTimeout(async () => {
         if (!_context) { return; }
-        await _context.globalState.update(FEEDBACK_SHOWN_KEY, true);
+        sendEvent('feedback/shown', { analysisCount: String(count) });
         const choice = await vscode.window.showInformationMessage(
             'How is CatalystOps working for you? Share feedback to help us improve.',
             'Give Feedback',
@@ -93,6 +179,8 @@ export function maybeShowFeedbackToast(): void {
         if (choice === 'Give Feedback') {
             sendEvent('feedback/form_opened');
             vscode.env.openExternal(vscode.Uri.parse(FEEDBACK_FORM_URL));
+        } else {
+            sendEvent('feedback/dismissed', { action: choice === 'Not now' ? 'not_now' : 'closed' });
         }
     }, 5000);
 }

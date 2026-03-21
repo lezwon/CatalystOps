@@ -13,7 +13,7 @@ import { createDiagnosticCollection, setCodeIssueDiagnostics, clearDiagnostics }
 import { createStatusBar, setIdle, setAnalyzing, setResults, setError } from './views/statusBar';
 import { analyzeCost, showGeneratedScript, previewDryRunScript, previewFullDryRunScript, showFullDryRunScript } from './commands/analyzeCost';
 import { initOutputChannel, logDebug, logError } from './logger';
-import { initTelemetry, sendEvent, maybeShowFeedbackToast, maybeShowDryRunNudge } from './telemetry';
+import { initTelemetry, sendEvent, maybeShowFeedbackToast, maybeShowDryRunNudge, incrementSessionCount } from './telemetry';
 import { analyzeSelection } from './commands/analyzeSelection';
 import { showReport } from './commands/showReport';
 import { configureConnection } from './commands/configureConnection';
@@ -22,6 +22,10 @@ import { createHoverProvider, createWriteSchemaHoverProvider } from './providers
 import { createCodeActionProvider } from './providers/codeActionProvider';
 import { IssuesTreeDataProvider } from './views/issuesTreeView';
 import { BillingTreeDataProvider } from './views/billingTreeView';
+import { JobsTreeDataProvider, JobItem } from './views/jobsTreeView';
+import { refreshJobsList, analyzeJobRun as analyzeJobRunCmd } from './commands/analyzeJobRun';
+import { refreshClustersList, connectClusterSsh, stopClusterCommand } from './commands/connectSsh';
+import { ClustersTreeDataProvider, ClusterItem } from './views/clustersTreeView';
 import { ExplainTreeDataProvider, PlanNodeItem } from './views/explainTreeView';
 import { showDagWebview, disposeDagWebview } from './views/dagWebview';
 import { showBillingDashboard } from './commands/showBillingDashboard';
@@ -35,6 +39,7 @@ export function activate(context: vscode.ExtensionContext): void {
     initOutputChannel(context);
     initTelemetry(context);
     sendEvent('extension/activated');
+    void incrementSessionCount();
 
     try {
         const diagnostics = createDiagnosticCollection();
@@ -71,6 +76,27 @@ export function activate(context: vscode.ExtensionContext): void {
         const billingTreeProvider = new BillingTreeDataProvider();
         vscode.window.registerTreeDataProvider('catalystops.billingTree', billingTreeProvider);
 
+        // Jobs tree view (configurable)
+        const jobsTreeProvider = new JobsTreeDataProvider();
+        const jobsTreeView = vscode.window.createTreeView('catalystops.jobsTree', { treeDataProvider: jobsTreeProvider });
+        context.subscriptions.push(jobsTreeView);
+        if (vscode.workspace.getConfiguration('catalystops').get<boolean>('jobs.enabled', true)) {
+            void refreshJobsList(jobsTreeProvider);
+        } else {
+            jobsTreeProvider.setError('Jobs panel disabled. Enable "catalystops.jobs.enabled" in settings.');
+        }
+
+        // Double-click detection: the TreeItem command fires on every click.
+        // Two calls for the same item within 400 ms = double-click → trigger analysis.
+        let lastClickedRunId: number | undefined;
+        let lastClickedJobName: string | undefined;
+        let lastClickTime = 0;
+
+        // Clusters tree view
+        const clustersTreeProvider = new ClustersTreeDataProvider();
+        vscode.window.registerTreeDataProvider('catalystops.clustersTree', clustersTreeProvider);
+        void refreshClustersList(clustersTreeProvider);
+
         // Register commands
         context.subscriptions.push(
             diagnostics,
@@ -87,6 +113,40 @@ export function activate(context: vscode.ExtensionContext): void {
                 () => showBillingDashboard(context, billingTreeProvider)),
             vscode.commands.registerCommand('catalystops.refreshBilling',
                 () => showBillingDashboard(context, billingTreeProvider, undefined, undefined, true)),
+            vscode.commands.registerCommand('catalystops.refreshJobs',
+                () => {
+                    if (vscode.workspace.getConfiguration('catalystops').get<boolean>('jobs.enabled', true)) {
+                        void refreshJobsList(jobsTreeProvider);
+                    }
+                }),
+            vscode.commands.registerCommand('catalystops.analyzeJobRun',
+                (runId: number, jobName: string) => analyzeJobRunCmd(context, issuesTreeProvider, runId, jobName)),
+            vscode.commands.registerCommand('catalystops.jobItemClicked',
+                (runId: number, jobName: string) => {
+                    const now = Date.now();
+                    if (runId === lastClickedRunId && jobName === lastClickedJobName && now - lastClickTime < 400) {
+                        lastClickedRunId = undefined;
+                        void analyzeJobRunCmd(context, issuesTreeProvider, runId, jobName);
+                    } else {
+                        lastClickedRunId = runId;
+                        lastClickedJobName = jobName;
+                        lastClickTime = now;
+                    }
+                }),
+            vscode.commands.registerCommand('catalystops.refreshClusters',
+                () => void refreshClustersList(clustersTreeProvider)),
+            vscode.commands.registerCommand('catalystops.connectClusterSsh',
+                (item: unknown) => {
+                    const cluster = item instanceof ClusterItem ? item.cluster : undefined;
+                    if (!cluster) { return; }
+                    void connectClusterSsh(cluster, context);
+                }),
+            vscode.commands.registerCommand('catalystops.stopCluster',
+                (item: unknown) => {
+                    const cluster = item instanceof ClusterItem ? item.cluster : undefined;
+                    if (!cluster) { return; }
+                    void stopClusterCommand(cluster, clustersTreeProvider);
+                }),
 
             // Explain Plan + DAG commands
             vscode.commands.registerCommand('catalystops.showPlanDag', () => {
@@ -114,6 +174,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 const sourceLine = node?.sourceLine;
                 const editor = vscode.window.activeTextEditor;
                 if (!editor || sourceLine === undefined) { return; }
+                if (sourceLine < 0 || sourceLine >= editor.document.lineCount) { return; }
                 const line = editor.document.lineAt(sourceLine);
                 const newText = line.text.replace(/\.join\s*\((\s*\w+)(\s*,)/, '.join(broadcast($1)$2');
                 if (newText === line.text) {
@@ -130,6 +191,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 const sourceLine = node?.sourceLine;
                 const editor = vscode.window.activeTextEditor;
                 if (!editor || sourceLine === undefined) { return; }
+                if (sourceLine < 0 || sourceLine >= editor.document.lineCount) { return; }
                 const line = editor.document.lineAt(sourceLine);
                 // Insert .repartition(200) before .join( or .groupBy(
                 const newText = line.text.replace(
@@ -151,8 +213,9 @@ export function activate(context: vscode.ExtensionContext): void {
                 const sourceLine = node?.sourceLine;
                 const editor = vscode.window.activeTextEditor;
                 if (!editor || !dfName || sourceLine === undefined) { return; }
+                if (sourceLine < 0 || sourceLine >= editor.document.lineCount) { return; }
                 // Insert dfName = dfName.persist() on the line after the assignment
-                const insertLine = sourceLine + 1;
+                const insertLine = Math.min(sourceLine + 1, editor.document.lineCount);
                 const lineEnd = new vscode.Position(insertLine, 0);
                 const indent = editor.document.lineAt(sourceLine).text.match(/^(\s*)/)?.[1] ?? '';
                 const edit = new vscode.WorkspaceEdit();
@@ -177,6 +240,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 const sourceLine = node?.sourceLine;
                 const editor = vscode.window.activeTextEditor;
                 if (!editor || sourceLine === undefined) { return; }
+                if (sourceLine < 0 || sourceLine >= editor.document.lineCount) { return; }
                 const key = await vscode.window.showInputBox({
                     prompt: 'Enter the join key column name',
                     placeHolder: 'e.g. id',
@@ -237,18 +301,23 @@ export function activate(context: vscode.ExtensionContext): void {
 
         // Run local analysis on active editor
         if (config.get<boolean>('analysis.enableLocalCodeAnalysis', true)) {
-            // Analyze on open and change
+            // Analyze on open and change — Python files
             if (vscode.window.activeTextEditor?.document.languageId === 'python') {
                 runLocalAnalysis(vscode.window.activeTextEditor.document, issuesTreeProvider);
             }
 
+            // Analyze active notebook on startup
+            if (vscode.window.activeNotebookEditor?.notebook) {
+                runNotebookAnalysis(vscode.window.activeNotebookEditor.notebook, issuesTreeProvider);
+            }
+
             let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+            let nbDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 
             context.subscriptions.push(
                 vscode.window.onDidChangeActiveTextEditor(editor => {
                     if (editor?.document.languageId === 'python') {
                         runLocalAnalysis(editor.document, issuesTreeProvider);
-                        void maybeShowFeedbackToast();
                     }
                 }),
                 vscode.workspace.onDidChangeTextDocument(event => {
@@ -263,6 +332,24 @@ export function activate(context: vscode.ExtensionContext): void {
                 vscode.workspace.onDidCloseTextDocument(doc => {
                     clearDiagnostics(doc.uri);
                 }),
+
+                // Notebook events
+                vscode.window.onDidChangeActiveNotebookEditor(editor => {
+                    if (editor?.notebook) {
+                        runNotebookAnalysis(editor.notebook, issuesTreeProvider);
+                    }
+                }),
+                vscode.workspace.onDidChangeNotebookDocument(event => {
+                    clearTimeout(nbDebounceTimer);
+                    nbDebounceTimer = setTimeout(() => {
+                        runNotebookAnalysis(event.notebook, issuesTreeProvider);
+                    }, 500);
+                }),
+                vscode.workspace.onDidCloseNotebookDocument(notebook => {
+                    for (const cell of notebook.getCells()) {
+                        clearDiagnostics(cell.document.uri);
+                    }
+                }),
             );
 
             // Auto-analyze (local only) on save if configured.
@@ -273,6 +360,9 @@ export function activate(context: vscode.ExtensionContext): void {
                         if (doc.languageId === 'python') {
                             runLocalAnalysis(doc, issuesTreeProvider);
                         }
+                    }),
+                    vscode.workspace.onDidSaveNotebookDocument(notebook => {
+                        runNotebookAnalysis(notebook, issuesTreeProvider);
                     }),
                 );
             }
@@ -328,6 +418,7 @@ function runLocalAnalysis(document: vscode.TextDocument, issuesTreeProvider: Iss
         setResults(critical, warnings, info);
 
         void maybeShowDryRunNudge(issues.length);
+        void maybeShowFeedbackToast();
         logDebug(`Local analysis: ${issues.length} issue(s) in ${document.fileName}`);
         sendEvent('local_analysis/complete', {
             issueCount: String(issues.length),
@@ -338,6 +429,95 @@ function runLocalAnalysis(document: vscode.TextDocument, issuesTreeProvider: Iss
         const message = err instanceof Error ? err.message : String(err);
         logError(`Local analysis failed: ${message}`);
         sendEvent('local_analysis/failed', { error: message.substring(0, 200) });
+    }
+}
+
+function runNotebookAnalysis(notebook: vscode.NotebookDocument, issuesTreeProvider: IssuesTreeDataProvider): void {
+    try {
+        // Collect Python code cells with their starting line offsets in the concatenated source
+        const pythonCells = notebook.getCells().filter(
+            cell => cell.kind === vscode.NotebookCellKind.Code && cell.document.languageId === 'python',
+        );
+        if (pythonCells.length === 0) { return; }
+
+        type CellOffset = { cell: vscode.NotebookCell; startLine: number; lineCount: number };
+        const cellOffsets: CellOffset[] = [];
+        const allLines: string[] = [];
+
+        for (const cell of pythonCells) {
+            // Strip IPython magic lines (%magic, %%magic, !shell) — they're not valid Python
+            // but preserve line count so issue line numbers stay accurate
+            const lines = cell.document.getText().split('\n').map(l =>
+                /^\s*(%%?[\w.]+|!)/.test(l) ? '' : l,
+            );
+            cellOffsets.push({ cell, startLine: allLines.length, lineCount: lines.length });
+            allLines.push(...lines);
+        }
+
+        const fullCode = allLines.join('\n');
+        const cfg = vscode.workspace.getConfiguration('catalystops');
+        const rawIssues = [...analyzeCode(fullCode, {
+            enableRepeatedScanDetection: cfg.get<boolean>('analysis.enableRepeatedScanDetection', false),
+        }), ...validateSchema(fullCode)];
+
+        // Same dedup logic as runLocalAnalysis
+        const schemaAwareUnionLines = new Set(
+            rawIssues.filter(i => /CODE_UNION_002/.test(i.id)).map(i => i.line),
+        );
+        const dedupSeen = new Set<string>();
+        const issues = rawIssues.filter(i => {
+            if (i.id === 'CODE_UNION_001' && schemaAwareUnionLines.has(i.line)) { return false; }
+            const key = `${i.id}:${i.line}`;
+            if (dedupSeen.has(key)) { return false; }
+            dedupSeen.add(key);
+            return true;
+        });
+
+        // Clear existing diagnostics on all Python cells
+        for (const { cell } of cellOffsets) {
+            clearDiagnostics(cell.document.uri);
+        }
+
+        // Bucket issues by cell and remap to cell-local line numbers
+        const issuesByCell = new Map<number, typeof issues>();
+        for (const issue of issues) {
+            for (let i = 0; i < cellOffsets.length; i++) {
+                const { startLine, lineCount } = cellOffsets[i];
+                if (issue.line >= startLine && issue.line < startLine + lineCount) {
+                    if (!issuesByCell.has(i)) { issuesByCell.set(i, []); }
+                    issuesByCell.get(i)!.push({
+                        ...issue,
+                        line: issue.line - startLine,
+                        endLine: Math.max(0, (issue.endLine ?? issue.line) - startLine),
+                    });
+                    break;
+                }
+            }
+        }
+
+        for (const [i, cellIssues] of issuesByCell) {
+            setCodeIssueDiagnostics(cellOffsets[i].cell.document.uri, cellIssues);
+        }
+
+        issuesTreeProvider.updateFromCodeIssues(issues);
+        updateMcpSnapshot({ filePath: notebook.uri.fsPath, issues, updatedAt: new Date() });
+
+        const critical = issues.filter(i => i.severity === Severity.CRITICAL).length;
+        const warnings = issues.filter(i => i.severity === Severity.WARNING).length;
+        const info = issues.filter(i => i.severity === Severity.INFO || i.severity === Severity.SUGGESTION).length;
+        setResults(critical, warnings, info);
+
+        logDebug(`Notebook analysis: ${issues.length} issue(s) across ${pythonCells.length} cell(s) in ${notebook.uri.fsPath}`);
+        sendEvent('local_analysis/notebook_complete', {
+            issueCount: String(issues.length),
+            cellCount: String(pythonCells.length),
+            critical: String(critical),
+            warnings: String(warnings),
+        });
+    } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        logError(`Notebook analysis failed: ${message}`);
+        sendEvent('local_analysis/notebook_failed', { error: message.substring(0, 200) });
     }
 }
 

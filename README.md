@@ -4,7 +4,7 @@
 
 <h1 align="center">CatalystOps — PySpark Optimizer</h1>
 
-**CatalystOps** catches PySpark performance issues before they hit production. It detects **35+ anti-patterns** locally in real time, validates **column names, types, and schema alignment** at edit time, estimates **notebook compute costs** from source annotations, runs **safe dry-run analysis** on a Databricks cluster or serverless compute to inspect Catalyst execution plans, and tracks **actual Databricks spending** in a built-in billing dashboard — all without executing Spark jobs or touching your data. Plan parsing is fully **Photon-aware** and detects cross-DataFrame repeated scans across your entire script.
+**CatalystOps** catches PySpark performance issues before they hit production. It detects **40+ anti-patterns** locally in real time, validates **column names, types, and schema alignment** at edit time, estimates **notebook compute costs** from source annotations, runs **safe dry-run analysis** on a Databricks cluster, serverless compute, or SSH tunnel to inspect Catalyst execution plans, analyses **historical job runs** from Spark event logs without re-running anything, and tracks **actual Databricks spending** in a built-in billing dashboard — all without touching your data. Plan parsing is fully **Photon-aware** and detects cross-DataFrame repeated scans across your entire script.
 
 > **Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=CatalystOps.catalystops)**
 
@@ -16,11 +16,12 @@
 
 PySpark makes it easy to write code that *works* but runs slowly or expensively at scale. Common pitfalls — `collect()` on large DataFrames, cartesian joins, missing broadcast hints, repeated table scans, union schema mismatches, and cache misconfigurations — often slip past code review and only surface as runaway cluster bills.
 
-CatalystOps gives you **three layers of analysis**:
+CatalystOps gives you **four layers of analysis**:
 
 - **Instant local checks** as you type — no cluster required
 - **Schema-aware checks** — column names, types, and set-operation alignment validated against schemas defined in the same file
-- **Deep plan analysis** on your actual Databricks cluster or serverless compute, parsing Catalyst physical and logical plans to catch issues that only appear at runtime
+- **Deep plan analysis** on your actual Databricks cluster, serverless compute, or via SSH tunnel, parsing Catalyst physical and logical plans to catch issues that only appear at runtime
+- **Historical job run analysis** — inspect Spark event logs from completed production jobs to surface plan issues in an interactive DAG view, without re-running anything
 
 ---
 
@@ -32,8 +33,8 @@ Detects anti-patterns instantly via regex-based pattern matching with full comme
 
 | Severity | Checks |
 |----------|--------|
-| **Critical** | `collect()`, `crossJoin()`, SQL injection via f-strings in `spark.sql()`, `kafka.enable.auto.commit = true`, `APPLY AS DELETE WHEN` after `SEQUENCE BY` in DLT AUTO CDC |
-| **Warning** | `collect()` on streaming (cross-batch stateful dedup), `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `withColumn` in loops, `.rdd` conversion, `checkpoint()`, `Window.orderBy()` without `partitionBy` (global window), AQE disabled via `spark.conf.set`, deprecated pandas `.append()`, non-deterministic UDFs, **unknown column names**, **type mismatches** (numeric / string / date / array functions on wrong column type), streaming checkpoint on DBFS (`/dbfs/` or `dbfs:/`), `.writeStream.start()` without `.trigger()`, `.groupBy()` on streaming DataFrame without `.withWatermark()`, `DROP TABLE` + `CREATE TABLE` (use `CREATE OR REPLACE TABLE`), `dynamicAllocation.enabled = true` on streaming cluster, `FloatType`/`DoubleType` for financial columns (use `DecimalType`), `OPTIMIZE` after every `MERGE` in `foreachBatch`, inner join in streaming file (silently drops unmatched events), `read_files()` without `schemaHints` in DLT pipeline, `PARTITION BY` instead of `CLUSTER BY` in DLT table |
+| **Critical** | `collect()`, `crossJoin()`, SQL injection via f-strings in `spark.sql()`, `kafka.enable.auto.commit = true`, `APPLY AS DELETE WHEN` after `SEQUENCE BY` in DLT AUTO CDC, **`for row in df.collect()`** (iterating over collected rows — fetches the full dataset to the driver) |
+| **Warning** | `collect()` on streaming (cross-batch stateful dedup), `toPandas()`, `coalesce(1)`, `repartition(1)`, `dropDuplicates()` without subset, `withColumn` in loops, `.rdd` conversion, `checkpoint()`, `Window.orderBy()` without `partitionBy` (global window), AQE disabled via `spark.conf.set`, deprecated pandas `.append()`, non-deterministic UDFs, **unknown column names**, **type mismatches** (numeric / string / date / array functions on wrong column type), streaming checkpoint on DBFS (`/dbfs/` or `dbfs:/`), `.writeStream.start()` without `.trigger()`, `.groupBy()` on streaming DataFrame without `.withWatermark()`, `DROP TABLE` + `CREATE TABLE` (use `CREATE OR REPLACE TABLE`), `dynamicAllocation.enabled = true` on streaming cluster, `FloatType`/`DoubleType` for financial columns (use `DecimalType`), `OPTIMIZE` after every `MERGE` in `foreachBatch`, inner join in streaming file (silently drops unmatched events), `read_files()` without `schemaHints` in DLT pipeline, `PARTITION BY` instead of `CLUSTER BY` in DLT table, **`.repartition(N)` immediately before `.write`** (shuffle waste — write partitioning handles this), **UDF used inside `.filter()`** (filters with UDFs block predicate pushdown), **repeated actions on the same DataFrame without `.cache()`** (e.g. `.count()` + `.show()` re-evaluates the full plan twice) |
 | **Warning** _(opt-in)_ | Source DataFrame used 2+ times without `.cache()` / `.persist()` — tracks aliases and derived DataFrames transitively. Enable via `catalystops.analysis.enableRepeatedScanDetection`. |
 | **Info** | UDF usage, schema inference, chained `.filter()`, `show()` / `display()` in production, `cache()` without `unpersist()`, `select("*")`, global `orderBy`, missing write mode, `pandas_udf`, `to_pandas_on_spark()`, static partition overwrite without dynamic config, `Table May Lack Statistics`, `ZORDER BY` (use Liquid Clustering), missing `.option("queryName", ...)` on streaming query, no `ANALYZE TABLE` after overwrite, `MERGE` without Deletion Vectors (`delta.enableDeletionVectors`), `MERGE` without Row-Level Concurrency (`delta.enableRowLevelConcurrency`), Auto Loader without `maxBytesPerTrigger`, stateful streaming without RocksDB state store, `SELECT *` in DLT pipeline, `CLUSTER BY AUTO` in production DLT table |
 
@@ -59,6 +60,19 @@ Each issue shows a **one-line explanation** and a **quick fix code block** on ho
 | `CODE_MERGE_RLC_001` | **Info** | `MERGE INTO` without `delta.enableRowLevelConcurrency = true` — concurrent MERGEs conflict at the file level; Row-Level Concurrency eliminates unnecessary conflicts |
 | `CODE_AUTOLOADER_RATE_001` | **Info** | Auto Loader stream (`cloudFiles.format`) without `maxBytesPerTrigger` — no backlog protection; a large backlog is processed in a single OOM-prone batch |
 | `CODE_ROCKSDB_001` | **Info** | Stateful streaming operation (`.groupBy()`, `flatMapGroupsWithState`) without RocksDB state store configured — the default in-memory store will OOM for large state; enable `RocksDBStateProvider` |
+
+#### New in Recent Releases
+
+| Issue ID | Severity | What it detects |
+|----------|----------|-----------------|
+| `CODE_ITER_COLLECT_001` | **Critical** | `for row in df.collect()` — collects the full dataset to the driver then iterates row-by-row; use `df.foreach()` or DataFrame transformations instead |
+| `CODE_REPARTITION_WRITE_001` | **Warning** | `.repartition(N)` within 4 lines of `.write` / `.saveAsTable()` / `.insertInto()` — the write operation's own partitioning makes the preceding shuffle redundant |
+| `CODE_UDF_FILTER_001` | **Warning** | A registered UDF used inside `.filter()` — UDFs are opaque to the Catalyst optimizer and block predicate pushdown; rewrite with native Spark functions |
+| `CODE_REPEATED_ACTIONS_001` | **Warning** | The same DataFrame has two or more actions (`.count()`, `.show()`, `.collect()`, etc.) with no `.cache()` / `.persist()` in between — each action re-evaluates the full plan |
+| `MissingPartitionFilter` | **Warning** _(plan-level)_ | `PartitionFilters: []` in a FileScan on a qualified table — the query reads all partitions; add a filter on the partition column |
+| `SinglePartitionBottleneck` | **Warning** _(plan-level)_ | `Exchange SinglePartition` — all data is collected to a single executor, eliminating parallelism. Caused by global aggregation (no GROUP BY) or global window (no PARTITION BY) |
+| `SortAggregate` | **Warning** _(plan-level)_ | `SortAggregate` instead of `HashAggregate` — Spark chose a slower sort-based aggregation path, typically due to complex types or UDAFs; prone to spilling to disk on large datasets |
+| `GlobalWindow` _(RunningWindowFunction)_ | **Warning** _(plan-level)_ | Window function with no PARTITION BY, including Photon's `RunningWindowFunction` — forces all data into a single partition; add a PARTITION BY column to distribute the work |
 
 #### DLT / Spark Declarative Pipeline Checks
 
@@ -230,6 +244,58 @@ $(graph) Last 7 days: $84.20  (312.5 DBUs)
 4. If a fetch fails, the dashboard restores the last successful result
 
 > **Requirement**: Unity Catalog System Tables must be enabled on your workspace (`system.billing.usage`).
+
+---
+
+### Job Run Analysis (Historical Runs — No Re-execution Required)
+
+Analyze a past Databricks job run directly from the **Jobs** sidebar panel — no need to re-run the job. CatalystOps reads the Spark event log written by the cluster, extracts physical plans, and surfaces plan issues in an interactive DAG view.
+
+**Jobs sidebar panel** — lists up to 25 workspace jobs with last-run status, age, and duration:
+
+```
+JOBS
+├── ✅ etl-pipeline          2h ago · 14m
+├── ❌ daily-aggregation      1d ago · failed
+└── ⏺  ml-feature-store      3d ago · 22m
+```
+
+Click any job to trigger analysis of its most recent run.
+
+**What happens when you analyze a run:**
+
+1. **Run metadata** — fetches status, duration, cluster ID, and run ID via the Jobs API
+2. **Execution plans** — reads `SparkListenerSQLExecutionStart` events from the DBFS event log (up to 20 MB scanned), extracts physical plan text, and runs the same plan analysis as a dry run (including AQE Initial Plan support)
+3. **DAG view** — opens an interactive plan tree showing all SQL queries grouped by originating command. Each node displays the operator type, table or file name, filter conditions in plain English, and a severity badge for any detected issues
+4. **Issues panel** — plan-level issues appear in the sidebar for quick navigation
+5. **View Source** — a button in the DAG view opens the source notebook or Python script on demand
+
+**DAG view highlights:**
+- Queries grouped into collapsible accordions by description (e.g. `3 executions`)
+- Human-friendly filter conditions: `col not null`, `col = value`, `a and b`
+- Raw physical plan text available in a collapsible section at the bottom
+
+**What the plan parser detects:**
+
+| Issue | Cost | Description |
+|-------|------|-------------|
+| `CrossJoin` | 500 | Cartesian product — O(n×m) row explosion |
+| `SortMergeJoin` | 50 | Shuffle join — consider broadcasting the smaller side |
+| `SinglePartitionBottleneck` | 65 | `Exchange SinglePartition` — all data to one executor |
+| `GlobalWindow` | 70 | Window with no PARTITION BY — eliminates parallelism |
+| `SortAggregate` | 35 | Sort-based aggregation — slower than HashAggregate, spill-prone |
+| `RepeatedFileScan` | 30–80 | Same table read multiple times without caching |
+| `MissingPartitionFilter` | 60 | No partition pruning — full table scan |
+| `MissingTableStatistics` | 50 | Optimizer can't estimate join order or broadcast thresholds |
+
+**Prerequisites for plan analysis:**
+- Cluster must have "Cluster log delivery" (DBFS) configured in its settings
+- Classic compute only — serverless runs don't write event logs to DBFS
+- DBR any version (reads standard Spark event log format)
+
+**MCP integration:** after a job run analysis, the plan issues and physical plan text are available to Claude via the `get_last_job_run_analysis` tool.
+
+**Disable / re-enable:** set `catalystops.jobs.enabled` to `false` to hide the panel.
 
 ---
 
@@ -423,13 +489,33 @@ Leave **Cluster ID blank** in the configuration wizard — CatalystOps automatic
 }
 ```
 
+#### Option D — SSH tunnel (Databricks SSH, DBR 17+)
+
+Connect via an SSH tunnel to a running cluster. Requires [Databricks CLI ≥ 0.269](https://docs.databricks.com/aws/en/dev-tools/cli/install) and `databricks auth login` configured.
+
+```bash
+# One-time setup
+databricks ssh setup --name my-cluster --cluster <cluster-id>
+```
+
+```jsonc
+{
+  "catalystops.connection.sshTunnel.enabled": true,
+  "catalystops.connection.sshTunnel.connectionName": "my-cluster"
+}
+```
+
+The extension uses `ssh my-cluster python3` to execute analysis scripts directly on the cluster driver, which has a full PySpark environment available. Useful for clusters in private networks where direct API access isn't required to be bypassed, or when you want lower-overhead execution without the Jobs API round-trip.
+
+> **Requirements**: Databricks Runtime 17.0+, Unity Catalog enabled, OpenSSH installed locally, `databricks ssh setup` completed.
+
 ---
 
 ## Usage
 
 | Command | Shortcut | Description |
 |---------|----------|-------------|
-| **CatalystOps: Analyze Cost (Dry Run)** | `⌘⇧K` / `Ctrl+Shift+K` | Run local + cluster analysis on the active file |
+| **CatalystOps: Analyze Cost (Dry Run)** | `⌘⇧K` / `Ctrl+Shift+K` | Run local + cluster/serverless/SSH analysis on the active file |
 | **CatalystOps: Analyze Selected Code** | — | Analyze only the highlighted selection |
 | **CatalystOps: Show Report** | — | Open a shareable HTML report of the last analysis |
 | **CatalystOps: Configure Databricks Connection** | — | Interactive connection setup wizard |
@@ -437,6 +523,8 @@ Leave **Cluster ID blank** in the configuration wizard — CatalystOps automatic
 | **CatalystOps: Preview Dry-Run Script** | — | Preview only the neutralized user code (before submission) |
 | **CatalystOps: Show Billing Dashboard** | — | Open the billing dashboard (defaults to last 7 days) |
 | **CatalystOps: Refresh Billing Data** | — | Force a fresh billing query, bypassing the cache |
+| **CatalystOps: Refresh Jobs List** | — | Reload the Jobs sidebar panel from the workspace |
+| **CatalystOps: Analyze Job Run** | — | Analyze a historical job run (triggered by clicking a job in the sidebar) |
 
 ### Typical Workflow
 
@@ -458,7 +546,10 @@ Leave **Cluster ID blank** in the configuration wizard — CatalystOps automatic
 | `catalystops.databricks.clusterId` | `""` | Interactive cluster ID (leave blank to use serverless) |
 | `catalystops.databricks.configPath` | `~/.databrickscfg` | Path to Databricks CLI config file |
 | `catalystops.databricks.profile` | `DEFAULT` | Config profile name |
-| `catalystops.databricks.executionMode` | `cluster` | `cluster` or `serverless` — auto-set to `serverless` when cluster ID is blank |
+| `catalystops.databricks.executionMode` | `cluster` | `cluster` or `serverless` — auto-set to `serverless` when cluster ID is blank; overridden to `ssh` when SSH tunnel is enabled |
+| `catalystops.jobs.enabled` | `true` | Show the Jobs sidebar panel with workspace jobs and last-run status |
+| `catalystops.connection.sshTunnel.enabled` | `false` | Use Databricks SSH tunnel for script execution. Requires Databricks CLI ≥ 0.269 and DBR 17+ |
+| `catalystops.connection.sshTunnel.connectionName` | `""` | SSH connection name from `databricks ssh setup --name <name>` |
 | `catalystops.analysis.autoAnalyzeOnSave` | `false` | Auto-analyze on save |
 | `catalystops.analysis.enableLocalCodeAnalysis` | `true` | Enable local anti-pattern detection |
 | `catalystops.analysis.enableRepeatedScanDetection` | `false` | Warn when a source DataFrame (`spark.read.*`, `spark.table`, `spark.sql`) is used 2+ times without `.cache()` or `.persist()`. Tracks aliases and derived DataFrames transitively. Disabled by default — enable if you want to audit scan reuse in complex pipelines. |
@@ -538,12 +629,16 @@ Local `.py` files imported by your script are automatically detected and bundled
                                    ▼  (if Databricks configured)
 ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────────────┐
 │  Safety Wrapper  │────▶│  Cluster Script  │────▶│  Databricks              │
-│  neutralize      │     │  + local file    │     │  Jobs API (dry run)      │
-│  writes/actions  │     │  bundling        │     │  cluster or serverless   │
+│  neutralize      │     │  + local file    │     │  cluster / serverless /  │
+│  writes/actions  │     │  bundling        │     │  SSH tunnel              │
 └──────────────────┘     └──────────────────┘     └──────────┬───────────────┘
-                                                             │  run_page_url → toast
-                    ┌────────────────────┐                   │  "Open in Databricks"
-                    │  Plan Parser       │◀──────────────────┘
+                                                             │  dry run output
+┌──────────────────┐                                         │
+│  Jobs Sidebar    │──▶ Jobs API → last run → DBFS event log─┘
+│  (workspace jobs)│    → source code (notebook / py file)
+└──────────────────┘
+                    ┌────────────────────┐
+                    │  Plan Parser       │◀──── plan text (dry run or event log)
                     │  Physical plan     │  joins, shuffles, cache,
                     │  Logical plan      │  repeated scans (incl. cross-DataFrame),
                     │  Photon-aware      │  spills, Photon node types
@@ -616,14 +711,18 @@ catalyst-ops/
 │   ├── databricks/
 │   │   ├── client.ts             # Authenticated HTTP client for Databricks REST APIs
 │   │   ├── clusterExecution.ts   # Interactive cluster command submission and polling
-│   │   └── serverlessExecution.ts # Serverless job submission, polling, billing query
+│   │   ├── serverlessExecution.ts # Serverless job submission, polling, billing query
+│   │   ├── jobsApi.ts            # Jobs API: list jobs, run history, source code retrieval
+│   │   ├── eventLogParser.ts     # DBFS event log reader — extracts physical plans from completed runs
+│   │   └── sshExecution.ts       # SSH tunnel execution via `databricks ssh setup`
 │   ├── billing/
 │   │   ├── billingTypes.ts       # BillingRow / BillingSummary types, date-range helpers, computeSummary
 │   │   ├── billingFetcher.ts     # SQL Statement Execution API, warehouse discovery, result parsing
 │   │   └── billingCache.ts       # Local file cache (1-hour TTL) keyed by date range
 │   ├── commands/
-│   │   ├── analyzeCost.ts        # Full analysis orchestration
+│   │   ├── analyzeCost.ts        # Full analysis orchestration (cluster / serverless / SSH)
 │   │   ├── analyzeSelection.ts   # Selection-scoped analysis
+│   │   ├── analyzeJobRun.ts      # Historical job run analysis: event log → plans → source
 │   │   ├── showReport.ts         # HTML report generation
 │   │   ├── configureConnection.ts
 │   │   └── showBillingDashboard.ts # Billing orchestrator: cache → fetch → tree + webview
@@ -639,7 +738,9 @@ catalyst-ops/
 │       ├── statusBar.ts
 │       ├── issuesTreeView.ts     # Sidebar tree with progress, cost, and write summaries
 │       ├── billingTreeView.ts    # Billing sidebar tree (by user / job / workload)
-│       └── billingWebview.ts     # Full billing dashboard (tabs, bar charts, daily trend)
+│       ├── billingWebview.ts     # Full billing dashboard (tabs, bar charts, daily trend)
+│       ├── jobsTreeView.ts       # Jobs sidebar tree with last-run status + age
+│       └── explainTreeView.ts    # Catalyst plan tree with quick-fix inline buttons
 ├── test/
 │   └── suite/
 │       ├── codeAnalyzer.test.ts

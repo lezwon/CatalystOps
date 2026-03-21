@@ -9,7 +9,8 @@ export interface DatabricksConnectionConfig {
     host: string;
     token: string;
     clusterId?: string;
-    executionMode: 'cluster' | 'serverless';
+    executionMode: 'cluster' | 'serverless' | 'ssh';
+    sshConnectionName?: string;
 }
 
 /**
@@ -23,7 +24,12 @@ export function getConnectionConfig(): DatabricksConnectionConfig | undefined {
     let host = config.get<string>('databricks.host', '');
     let token = config.get<string>('databricks.token', '');
     let clusterId = config.get<string>('databricks.clusterId', '');
-    let executionMode = config.get<'cluster' | 'serverless'>('databricks.executionMode', 'cluster');
+    let executionMode = config.get<'cluster' | 'serverless' | 'ssh'>('databricks.executionMode', 'cluster');
+    const sshEnabled = config.get<boolean>('connection.sshTunnel.enabled', false);
+    const sshConnectionName = config.get<string>('connection.sshTunnel.connectionName', '').trim();
+    if (sshEnabled && sshConnectionName) {
+        executionMode = 'ssh';
+    }
 
     // Always try to fill missing values from ~/.databrickscfg
     const configPath = config.get<string>('databricks.configPath', '~/.databrickscfg');
@@ -59,7 +65,13 @@ export function getConnectionConfig(): DatabricksConnectionConfig | undefined {
         host = 'https://' + host;
     }
 
-    return { host, token, clusterId: clusterId || undefined, executionMode };
+    return {
+        host,
+        token,
+        clusterId: clusterId || undefined,
+        executionMode,
+        sshConnectionName: executionMode === 'ssh' ? sshConnectionName : undefined,
+    };
 }
 
 export function isLocalAnalysisEnabled(): boolean {

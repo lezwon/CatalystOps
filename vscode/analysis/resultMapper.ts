@@ -49,7 +49,7 @@ function resolveLocation(
     if (location) {
         const lineMatch = location.match(/Line\s+(\d+)/i);
         if (lineMatch) {
-            return { line: parseInt(lineMatch[1], 10) - 1, column: 0 };
+            return { line: Math.max(0, parseInt(lineMatch[1], 10) - 1), column: 0 };
         }
     }
 
@@ -153,6 +153,8 @@ function planIssueCategory(type: PlanIssue['type']): IssueCategory {
         case 'aggregation': return IssueCategory.CODE;
         case 'statistics': return IssueCategory.CONFIGURATION;
         case 'pushdown': return IssueCategory.RESOURCE;
+        case 'window': return IssueCategory.CODE;
+        case 'union': return IssueCategory.CODE;
     }
 }
 

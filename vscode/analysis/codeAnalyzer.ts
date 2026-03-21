@@ -1767,6 +1767,237 @@ CLUSTER BY (event_date, user_id)
         }
     }
 
+    // CY031: Iterating over .collect() — pulls entire dataset to driver then processes row-by-row
+    {
+        const iterCollectRe = /\bfor\s+\w+\s+in\s+[^:\n]*\.collect\s*\(\s*\)/g;
+        let icm: RegExpExecArray | null;
+        while ((icm = iterCollectRe.exec(code)) !== null) {
+            const offset = icm.index;
+            const lineNum = code.substring(0, offset).split('\n').length - 1;
+            const lineStart = code.lastIndexOf('\n', offset - 1) + 1;
+            const column = offset - lineStart;
+            const lineText = lines[lineNum] ?? '';
+            if (isInsideComment(lineText, column)) { continue; }
+            if (/# noqa: catalystops\b/i.test(lineText)) { continue; }
+            issues.push({
+                id: 'CODE_ITER_COLLECT_001',
+                severity: Severity.CRITICAL,
+                category: IssueCategory.CODE,
+                title: 'Iterating over .collect() — row-by-row Python processing',
+                description: '.collect() pulls the entire distributed dataset to the driver and iterates over it row-by-row in Python, defeating distributed execution entirely. This causes driver OOM on any non-trivial dataset and is the slowest way to process a Spark DataFrame.',
+                fix: {
+                    description: 'Use Spark transformations or write to storage instead of collecting and iterating',
+                    code: `# Instead of:
+for row in df.collect():
+    process(row)
+
+# Process in a distributed action:
+df.foreach(process)
+
+# Or, for small samples only:
+for row in df.limit(1000).collect():
+    process(row)`,
+                },
+                line: lineNum,
+                column,
+                endLine: lineNum,
+                endColumn: column + icm[0].length,
+                location: `Line ${lineNum + 1}`,
+            });
+        }
+    }
+
+    // CY008: .repartition() immediately before a write — full shuffle just to control file count.
+    // Use .coalesce() (no shuffle) or maxRecordsPerFile instead.
+    {
+        const repartRe = /\.repartition\s*\(\s*\d+/g;
+        let rpm: RegExpExecArray | null;
+        while ((rpm = repartRe.exec(code)) !== null) {
+            const offset = rpm.index;
+            const lineNum = code.substring(0, offset).split('\n').length - 1;
+            const lineStart = code.lastIndexOf('\n', offset - 1) + 1;
+            const column = offset - lineStart;
+            const lineText = lines[lineNum] ?? '';
+            if (isInsideComment(lineText, column)) { continue; }
+            if (/# noqa: catalystops\b/i.test(lineText)) { continue; }
+
+            // Check: is there a write action within the next 4 lines (covers chained and split calls)?
+            const ctxEnd = Math.min(lines.length - 1, lineNum + 4);
+            const ctxText = lines.slice(lineNum, ctxEnd + 1).join('\n');
+            if (!/\.(?:write\b|saveAsTable\s*\(|insertInto\s*\()/.test(ctxText)) { continue; }
+
+            issues.push({
+                id: 'CODE_REPARTITION_WRITE_001',
+                severity: Severity.WARNING,
+                category: IssueCategory.CODE,
+                title: 'repartition() before write — unnecessary full shuffle',
+                description: '.repartition(N) before a write triggers a full shuffle to redistribute data into N partitions across the cluster. Use .coalesce(N) instead — it merges existing partitions without a shuffle. For output file size control, prefer maxRecordsPerFile.',
+                fix: {
+                    description: 'Replace repartition() with coalesce() to avoid the shuffle',
+                    code: `# Instead of (full shuffle):
+df.repartition(1).write.parquet("path")
+
+# Use coalesce (no shuffle, merges partitions locally):
+df.coalesce(1).write.parquet("path")
+
+# For output file size control:
+df.write.option("maxRecordsPerFile", 1_000_000).parquet("path")`,
+                },
+                line: lineNum,
+                column,
+                endLine: lineNum,
+                endColumn: column + rpm[0].length,
+                location: `Line ${lineNum + 1}`,
+            });
+        }
+    }
+
+    // CY009: UDF inside .filter() — blocks predicate pushdown on partitioned/Delta tables,
+    // forcing a full table scan before the filter can be applied.
+    {
+        // Collect all UDF variable names defined in this file
+        const udfNames = new Set<string>();
+
+        // Pattern 1: my_udf = udf(...) / F.udf(...) / pandas_udf(...)
+        const udfAssignRe = /^[ \t]*(\w+)\s*=\s*(?:udf|F\.udf|pandas_udf|functions\.udf)\s*\(/gm;
+        udfAssignRe.lastIndex = 0;
+        let uam: RegExpExecArray | null;
+        while ((uam = udfAssignRe.exec(code)) !== null) {
+            udfNames.add(uam[1]);
+        }
+
+        // Pattern 2: @udf / @pandas_udf decorator → next def name
+        const decoratorRe = /@(?:udf|pandas_udf)\b[^\n]*\n(?:[ \t]*"""[^\n]*\n)?[ \t]*def\s+(\w+)/g;
+        decoratorRe.lastIndex = 0;
+        let drm: RegExpExecArray | null;
+        while ((drm = decoratorRe.exec(code)) !== null) {
+            udfNames.add(drm[1]);
+        }
+
+        if (udfNames.size > 0) {
+            const filterRe = /\.filter\s*\(/g;
+            filterRe.lastIndex = 0;
+            let fm: RegExpExecArray | null;
+            while ((fm = filterRe.exec(code)) !== null) {
+                const filterOffset = fm.index;
+                const lineNum = code.substring(0, filterOffset).split('\n').length - 1;
+                const lineStart = code.lastIndexOf('\n', filterOffset - 1) + 1;
+                const column = filterOffset - lineStart;
+                const lineText = lines[lineNum] ?? '';
+                if (isInsideComment(lineText, column)) { continue; }
+                if (/# noqa: catalystops\b/i.test(lineText)) { continue; }
+
+                // Check up to 2 lines for UDF name references
+                const ctxEnd = Math.min(lines.length - 1, lineNum + 2);
+                const ctxText = lines.slice(lineNum, ctxEnd + 1).join('\n');
+                const hasUdf = Array.from(udfNames).some(n => new RegExp(`\\b${n}\\s*\\(`).test(ctxText));
+                if (!hasUdf) { continue; }
+
+                issues.push({
+                    id: 'CODE_UDF_FILTER_001',
+                    severity: Severity.WARNING,
+                    category: IssueCategory.CODE,
+                    title: 'UDF inside .filter() — blocks predicate pushdown',
+                    description: 'A Python UDF inside .filter() prevents Spark from pushing the filter down to the storage layer. On partitioned or indexed Delta tables this forces a full table scan before the filter is applied, which can increase scan cost by 10–100×.',
+                    fix: {
+                        description: 'Replace the UDF filter with a native Spark column expression',
+                        code: `# Instead of (blocks pushdown):
+my_udf = udf(lambda x: x > 100)
+df.filter(my_udf(col("amount")))
+
+# Use a native expression (pushed down to storage):
+df.filter(col("amount") > 100)
+
+# For complex logic, use spark.sql() with SQL expressions:
+df.filter("amount > 100 AND status = 'ACTIVE'")`,
+                    },
+                    line: lineNum,
+                    column,
+                    endLine: lineNum,
+                    endColumn: column + fm[0].length,
+                    location: `Line ${lineNum + 1}`,
+                });
+            }
+        }
+    }
+
+    // CY014: Multiple Spark actions on the same DataFrame without caching.
+    // Each action forces full recomputation from source — O(N) scans for N actions.
+    {
+        const ACTION_RE = /\b(\w+)\.(count|show|collect|first|take|toPandas|head|isEmpty|toLocalIterator)\s*[\s([]/g;
+        // Map: varName → sorted list of action line numbers
+        const actionsByVar = new Map<string, number[]>();
+        // Map: varName → earliest cache/persist line number
+        const cacheLineByVar = new Map<string, number>();
+
+        // Pre-pass: collect all cache/persist calls
+        const cacheRe = /\b(\w+)\b[^#\n]*\.(?:cache|persist)\s*\(/g;
+        cacheRe.lastIndex = 0;
+        let crm: RegExpExecArray | null;
+        while ((crm = cacheRe.exec(code)) !== null) {
+            const varName = crm[1];
+            if (varName.startsWith('_') || varName.length <= 1) { continue; }
+            const offset = crm.index;
+            const lineNum = code.substring(0, offset).split('\n').length - 1;
+            if (!cacheLineByVar.has(varName)) {
+                cacheLineByVar.set(varName, lineNum);
+            }
+        }
+
+        let am: RegExpExecArray | null;
+        ACTION_RE.lastIndex = 0;
+        while ((am = ACTION_RE.exec(code)) !== null) {
+            const varName = am[1];
+            // Skip Spark internals and single-char vars
+            if (varName.startsWith('_') || varName.length <= 1) { continue; }
+            // Skip keywords that look like variable names
+            if (/^(?:spark|sc|df|self|cls|super|True|False|None)$/.test(varName)) { continue; }
+
+            const offset = am.index;
+            const lineNum = code.substring(0, offset).split('\n').length - 1;
+            const lineStart = code.lastIndexOf('\n', offset - 1) + 1;
+            const lineText = lines[lineNum] ?? '';
+            if (isInsideComment(lineText, offset - lineStart)) { continue; }
+            if (/# noqa: catalystops\b/i.test(lineText)) { continue; }
+
+            const actions = actionsByVar.get(varName) ?? [];
+            actions.push(lineNum);
+            actionsByVar.set(varName, actions);
+        }
+
+        for (const [varName, actionLines] of actionsByVar) {
+            if (actionLines.length < 2) { continue; }
+            const cacheAt = cacheLineByVar.get(varName) ?? -1;
+            // Don't flag if there's a cache anywhere before the 2nd action
+            if (cacheAt >= 0 && cacheAt < actionLines[1]) { continue; }
+            // Only flag if actions are within 50 lines of each other (same logical block)
+            if (actionLines[1] - actionLines[0] > 50) { continue; }
+
+            const flagLine = actionLines[1];
+            const lineText = lines[flagLine] ?? '';
+            const colIdx = lineText.indexOf(varName);
+
+            issues.push({
+                id: 'CODE_REPEATED_ACTIONS_001',
+                severity: Severity.WARNING,
+                category: IssueCategory.CODE,
+                title: `"${varName}" triggered ${actionLines.length}× without caching`,
+                description: `"${varName}" has ${actionLines.length} Spark actions (lines ${actionLines.map(l => l + 1).join(', ')}) without .cache() in between. Each action recomputes the full DataFrame lineage from source — O(N) full scans for N actions.`,
+                fix: {
+                    description: 'Cache the DataFrame before the first action to reuse the result',
+                    code: `${varName}.cache()   # materialise once
+${varName}.count()
+${varName}.show()   # reads from cache — no recompute`,
+                },
+                line: flagLine,
+                column: Math.max(colIdx, 0),
+                endLine: flagLine,
+                endColumn: lineText.length,
+                location: `Line ${flagLine + 1}`,
+            });
+        }
+    }
+
     // Schema validation: column name and type checks
     const schemaIssues = validateSchema(code);
     issues.push(...schemaIssues);

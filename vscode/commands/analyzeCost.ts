@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import { getConnectionConfig } from '../config/settings';
 import { ensureClusterRunning } from '../databricks/clusterManager';
 import { executeCommand } from '../databricks/commandExecution';
+import { checkSshAvailable, executeViaSsh } from '../databricks/sshExecution';
 import {
     checkServerlessAvailability,
     uploadScriptToWorkspace,
@@ -30,7 +31,23 @@ import { setAnalyzing, setResults, setError, setIdle } from '../views/statusBar'
 import { IssuesTreeDataProvider, ProgressStep, ProgressStepStatus } from '../views/issuesTreeView';
 import { AnalysisResult, CodeIssue, Severity } from '../models/types';
 import { log, logDebug, logError, showOutput } from '../logger';
-import { sendEvent, HAS_USED_DRY_RUN_KEY } from '../telemetry';
+import { sendEvent, HAS_USED_DRY_RUN_KEY, maybeShowRatingPrompt } from '../telemetry';
+
+/**
+ * Classify an error message into a privacy-safe category.
+ * Never sends raw user code or stack traces — only a category string.
+ */
+function classifyError(msg: string): string {
+    const m = msg.toLowerCase();
+    if (/modulenotfounderror|importerror|no module named/.test(m)) { return 'import_error'; }
+    if (/syntaxerror/.test(m)) { return 'syntax_error'; }
+    if (/analysisexception|unresolvedattribute|cannotresolvecolumn/.test(m)) { return 'spark_analysis_error'; }
+    if (/permissiondenied|unauthorized|403 forbidden|access denied/.test(m)) { return 'auth_error'; }
+    if (/timeouterror|timed out|timeout/.test(m)) { return 'timeout'; }
+    if (/memoryerror|out of memory|oom/.test(m)) { return 'oom'; }
+    if (/connectionerror|connectionrefused|network/.test(m)) { return 'network_error'; }
+    return 'other';
+}
 
 /** Store the last analysis result for report generation */
 let lastAnalysisResult: AnalysisResult[] | undefined;
@@ -167,6 +184,7 @@ export async function analyzeCost(
 
     // Try cluster analysis
     const config = getConnectionConfig();
+    sendEvent('command/analyze_cost_mode', { executionMode: config?.executionMode ?? 'unknown' });
     const timeoutSeconds = vscode.workspace.getConfiguration('catalystops').get<number>('dryRun.timeoutSeconds', 300);
     const dryRunTimeoutMs = Math.max(timeoutSeconds, 30) * 1000;
     if (!config) {
@@ -208,7 +226,51 @@ export async function analyzeCost(
         let serverlessRunPageUrl: string | undefined;
         let serverlessRunId: string | undefined;
 
-        if (config.executionMode === 'serverless') {
+        if (config.executionMode === 'ssh') {
+            // --- SSH tunnel path ---
+            log(`Execution mode: SSH (connection: ${config.sshConnectionName})`);
+            addStep('Connecting via SSH', 'running');
+
+            const sshName = config.sshConnectionName!;
+            const available = await checkSshAvailable(sshName);
+            if (!available) {
+                finishStep('error', 'unreachable');
+                sendEvent('dry_run/ssh_unavailable', { connectionName: sshName });
+                vscode.window.showErrorMessage(
+                    `CatalystOps: Cannot reach SSH connection "${sshName}". ` +
+                    `Make sure the cluster is running and "databricks ssh setup --name ${sshName}" is configured.`,
+                );
+                return;
+            }
+            finishStep('done');
+
+            addStep('Generating script', 'running');
+            const sourceDir = path.dirname(editor.document.uri.fsPath);
+            const { script, processedUserCode } = generateClusterScript(code, sourceDir);
+            lastProcessedUserCode = processedUserCode;
+            lastScript = script;
+            finishStep('done', `${(script.length / 1024).toFixed(1)} KB`);
+
+            addStep('Running on cluster via SSH', 'running');
+            log(`Executing script on Databricks via SSH (${sshName})…`);
+            try {
+                output = await executeViaSsh(sshName, script, dryRunTimeoutMs);
+                lastRawOutput = output;
+                finishStep('done');
+            } catch (sshErr) {
+                finishStep('error');
+                const msg = sshErr instanceof Error ? sshErr.message : String(sshErr);
+                logError(`SSH execution failed: ${msg}`);
+                setError(msg.substring(0, 100));
+                fireDryRunError(`SSH execution failed: ${msg}`);
+                sendEvent('dry_run/ssh_execution_error', { connectionName: sshName, error: msg.substring(0, 200) });
+                vscode.window.showErrorMessage(`CatalystOps SSH execution failed: ${msg}`);
+                setCodeIssueDiagnostics(editor.document.uri, localIssues);
+                issuesTreeProvider.updateFromCodeIssues(localIssues);
+                setTimeout(() => issuesTreeProvider.clearProgress(), 5000);
+                return;
+            }
+        } else if (config.executionMode === 'serverless') {
             // --- Serverless path ---
             log('Execution mode: serverless');
 
@@ -382,9 +444,11 @@ export async function analyzeCost(
             logError(`Execution error: ${e.error || e.traceback || JSON.stringify(e)}`);
         }
         if (actualErrors.length > 0) {
+            const firstErrMsg = (actualErrors[0] as any).error ?? (actualErrors[0] as any).traceback ?? '';
             sendEvent('dry_run/execution_errors', {
                 executionMode: config.executionMode,
                 errorCount: String(actualErrors.length),
+                errorType: classifyError(firstErrMsg),
             });
         }
 
@@ -490,6 +554,7 @@ export async function analyzeCost(
             costEstimate: runCost.formatted,
             hasTableStats: String(Object.keys(tableStats).length > 0),
         });
+        void maybeShowRatingPrompt('dry_run');
 
         const msg = `CatalystOps: Analysis complete. ${totalIssues} issues found (${localIssues.length} local, ${dryRunCount} from dry run). Estimated cost: ${runCost.formatted}.`;
         vscode.window.showInformationMessage(
@@ -533,6 +598,7 @@ export async function analyzeCost(
         sendEvent('analysis/failed', {
             executionMode: config?.executionMode ?? 'unknown',
             error: message.substring(0, 200),
+            durationMs: String(Date.now() - _dryRunStart),
         });
         vscode.window.showErrorMessage(`CatalystOps: ${message}`);
 

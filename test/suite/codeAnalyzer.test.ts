@@ -1028,4 +1028,76 @@ spark.sql(f"SELECT * FROM {table}")
         const dltIssues = issues.filter(i => dltIds.includes(i.id));
         assert.strictEqual(dltIssues.length, 0, 'no DLT checks should fire in a non-DLT file');
     });
+
+    // CY031 — iterating over .collect()
+    test('should detect for-loop over collect()', () => {
+        const code = 'for row in df.collect():\n    print(row)';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_ITER_COLLECT_001'), 'should detect for-loop collect');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_ITER_COLLECT_001')!.severity, 'critical');
+    });
+
+    test('should not flag regular collect() assignment as CY031', () => {
+        const code = 'data = df.collect()';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_ITER_COLLECT_001'), 'assignment to collect() is not CY031');
+    });
+
+    // CY008 — repartition before write
+    test('should detect repartition() immediately before write (chained)', () => {
+        const code = 'df.repartition(1).write.parquet("path")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_REPARTITION_WRITE_001'), 'should detect repartition before write');
+    });
+
+    test('should detect repartition() before write (multi-line)', () => {
+        const code = 'df = df.repartition(200)\ndf.write.parquet("path")';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_REPARTITION_WRITE_001'), 'should detect repartition before multi-line write');
+    });
+
+    test('should not flag repartition() without a following write', () => {
+        const code = 'df = df.repartition(200)\ndf.show()';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_REPARTITION_WRITE_001'), 'repartition without write should not be CY008');
+    });
+
+    // CY009 — UDF in filter()
+    test('should detect UDF inside filter()', () => {
+        const code = 'my_udf = udf(lambda x: x > 0)\ndf.filter(my_udf(col("amount")))';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_UDF_FILTER_001'), 'should detect UDF in filter');
+        assert.strictEqual(issues.find(i => i.id === 'CODE_UDF_FILTER_001')!.severity, 'warning');
+    });
+
+    test('should not flag native Spark expression in filter()', () => {
+        const code = 'df.filter(col("amount") > 100)';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_UDF_FILTER_001'), 'native filter should not be flagged');
+    });
+
+    test('should not flag UDF in filter() if no UDFs are defined', () => {
+        const code = 'df.filter(some_func(col("x")))';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_UDF_FILTER_001'), 'unknown function in filter should not be flagged');
+    });
+
+    // CY014 — repeated actions without cache
+    test('should detect multiple actions on the same DataFrame', () => {
+        const code = 'orders.count()\norders.show()';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_REPEATED_ACTIONS_001'), 'should detect repeated actions');
+    });
+
+    test('should not flag repeated actions when cache is present', () => {
+        const code = 'orders.cache()\norders.count()\norders.show()';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_REPEATED_ACTIONS_001'), 'cached DF should not be flagged');
+    });
+
+    test('should not flag a single action', () => {
+        const code = 'orders.count()';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_REPEATED_ACTIONS_001'), 'single action should not be flagged');
+    });
 });

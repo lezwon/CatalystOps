@@ -2,14 +2,14 @@
   "name": "catalystops",
   "displayName": "CatalystOps - PySpark Optimizer",
   "description": "Analyze PySpark code for performance issues using Catalyst execution plan analysis",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "publisher": "CatalystOps",
   "repository": {
     "type": "git",
     "url": "https://github.com/lezwon/CatalystOps"
   },
   "homepage": "https://spendops.dev",
-  "license": "MIT",
+  "license": "Elastic-2.0",
   "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.85.0"
@@ -29,7 +29,10 @@
     "onLanguage:python",
     "onView:catalystops.issuesTree",
     "onView:catalystops.billingTree",
-    "onView:catalystops.explainTree"
+    "onView:catalystops.explainTree",
+    "onView:catalystops.jobsTree",
+    "onView:catalystops.clustersTree",
+    "onNotebook:jupyter-notebook"
   ],
   "main": "./out/vscode/extension.js",
   "contributes": {
@@ -77,6 +80,35 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "catalystops.refreshJobs",
+        "title": "CatalystOps: Refresh Jobs List",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "catalystops.analyzeJobRun",
+        "title": "CatalystOps: Analyze Job Run",
+        "icon": "$(search)"
+      },
+      {
+        "command": "catalystops.refreshClusters",
+        "title": "CatalystOps: Refresh Clusters",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "catalystops.connectClusterSsh",
+        "title": "Connect via SSH",
+        "icon": "$(remote)"
+      },
+      {
+        "command": "catalystops.stopCluster",
+        "title": "Stop Cluster",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "catalystops.jobItemClicked",
+        "title": "Analyze Job Run (double-click)"
+      },
+      {
         "command": "catalystops.showPlanDag",
         "title": "CatalystOps: Show Plan DAG",
         "icon": "$(type-hierarchy)"
@@ -119,93 +151,140 @@
         "when": "editorTextFocus && editorLangId == python"
       }
     ],
-    "configuration": {
-      "title": "CatalystOps",
-      "properties": {
-        "catalystops.databricks.host": {
-          "type": "string",
-          "default": "",
-          "description": "Databricks workspace URL (e.g., https://myworkspace.cloud.databricks.com)"
-        },
-        "catalystops.databricks.token": {
-          "type": "string",
-          "default": "",
-          "description": "Databricks personal access token"
-        },
-        "catalystops.databricks.clusterId": {
-          "type": "string",
-          "default": "",
-          "description": "Interactive cluster ID for dry run analysis"
-        },
-        "catalystops.databricks.configPath": {
-          "type": "string",
-          "default": "~/.databrickscfg",
-          "description": "Path to Databricks CLI config file (~/.databrickscfg)"
-        },
-        "catalystops.databricks.profile": {
-          "type": "string",
-          "default": "DEFAULT",
-          "description": "Databricks config profile name"
-        },
-        "catalystops.analysis.autoAnalyzeOnSave": {
-          "type": "boolean",
-          "default": false,
-          "description": "Automatically analyze PySpark files on save"
-        },
-        "catalystops.analysis.enableLocalCodeAnalysis": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable local anti-pattern detection (no cluster needed)"
-        },
-        "catalystops.analysis.enableRepeatedScanDetection": {
-          "type": "boolean",
-          "default": false,
-          "description": "Warn when a source DataFrame (spark.read.*, spark.table, spark.sql) is used multiple times without .cache() or .persist(). Tracks aliases and derived DataFrames transitively. Disable if you see false positives in complex DAGs."
-        },
-        "catalystops.cost.dbuRatePerHour": {
-          "type": "number",
-          "default": 0.4,
-          "description": "DBU rate per hour for interactive cluster cost estimation (dollars)"
-        },
-        "catalystops.cost.serverlessRatePerHour": {
-          "type": "number",
-          "default": 0.7,
-          "description": "Effective cost per hour for serverless runs (dollars). Used with data-volume-based cost estimation. Rough guide: DBU rate × expected DBUs/hour for your workload."
-        },
-        "catalystops.cost.queryBillingUsage": {
-          "type": "boolean",
-          "default": false,
-          "description": "After each serverless dry run, submit a background job that queries system.billing.usage to fetch the actual DBU consumption and show the real cost. Requires Unity Catalog System Tables to be enabled on your workspace. Billing data typically appears 1–5 minutes after run completion."
-        },
-        "catalystops.databricks.executionMode": {
-          "type": "string",
-          "enum": ["cluster", "serverless"],
-          "default": "cluster",
-          "description": "Execution mode for dry-run analysis. 'cluster' uses an interactive cluster (requires clusterId). 'serverless' uses Databricks Serverless Compute (requires Premium tier, no clusterId needed)."
-        },
-        "catalystops.billing.warehouseId": {
-          "type": "string",
-          "default": "",
-          "description": "SQL warehouse ID to use for billing queries. If empty, CatalystOps auto-selects the first available warehouse."
-        },
-        "catalystops.debug": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable debug logging (logs equivalent curl commands for every Databricks API call to the Output panel)"
-        },
-        "catalystops.mcp.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable the CatalystOps MCP server for integration with Claude, Copilot, and other MCP clients. Restart VS Code after changing."
-        },
-        "catalystops.dryRun.timeoutSeconds": {
-          "type": "number",
-          "default": 300,
-          "minimum": 30,
-          "description": "Maximum time in seconds to wait for a dry-run job to complete before cancelling. Applies to both cluster and serverless execution modes."
+    "configuration": [
+      {
+        "title": "Databricks: Connection",
+        "properties": {
+          "catalystops.databricks.host": {
+            "type": "string",
+            "default": "",
+            "description": "Databricks workspace URL (e.g., https://myworkspace.cloud.databricks.com)"
+          },
+          "catalystops.databricks.token": {
+            "type": "string",
+            "default": "",
+            "description": "Databricks personal access token"
+          },
+          "catalystops.databricks.profile": {
+            "type": "string",
+            "default": "DEFAULT",
+            "description": "Databricks CLI config profile name (from ~/.databrickscfg)"
+          },
+          "catalystops.databricks.configPath": {
+            "type": "string",
+            "default": "~/.databrickscfg",
+            "description": "Path to the Databricks CLI config file"
+          },
+          "catalystops.databricks.clusterId": {
+            "type": "string",
+            "default": "",
+            "description": "Interactive cluster ID used for dry-run analysis (required when executionMode is 'cluster')"
+          },
+          "catalystops.databricks.executionMode": {
+            "type": "string",
+            "enum": ["cluster", "serverless"],
+            "default": "cluster",
+            "description": "Execution mode for dry-run analysis. 'cluster' uses an interactive cluster (requires Cluster ID). 'serverless' uses Databricks Serverless Compute (requires Premium tier)."
+          },
+          "catalystops.dryRun.timeoutSeconds": {
+            "type": "number",
+            "default": 300,
+            "minimum": 30,
+            "description": "Maximum seconds to wait for a dry-run job to complete before cancelling."
+          }
+        }
+      },
+      {
+        "title": "Databricks: Jobs",
+        "properties": {
+          "catalystops.jobs.enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Show the Jobs sidebar panel with last-run status and plan analysis on historical runs."
+          }
+        }
+      },
+      {
+        "title": "Databricks: Billing",
+        "properties": {
+          "catalystops.billing.warehouseId": {
+            "type": "string",
+            "default": "",
+            "description": "SQL warehouse ID for billing queries. Leave empty to auto-select the first available warehouse."
+          },
+          "catalystops.cost.dbuRatePerHour": {
+            "type": "number",
+            "default": 0.4,
+            "description": "DBU rate per hour for interactive cluster cost estimation (dollars)."
+          },
+          "catalystops.cost.serverlessRatePerHour": {
+            "type": "number",
+            "default": 0.7,
+            "description": "Effective cost per hour for serverless runs (dollars)."
+          },
+          "catalystops.cost.queryBillingUsage": {
+            "type": "boolean",
+            "default": false,
+            "description": "After each serverless dry run, query system.billing.usage to fetch real DBU consumption. Requires Unity Catalog System Tables. Billing data appears 1–5 minutes after run completion."
+          }
+        }
+      },
+      {
+        "title": "Databricks: Clusters & SSH",
+        "properties": {
+          "catalystops.ssh.shutdownDelay": {
+            "type": "string",
+            "default": "30m",
+            "description": "How long to keep the cluster alive after the SSH session closes (e.g. '10m', '1h'). Passed as --shutdown-delay to `databricks ssh setup`."
+          },
+          "catalystops.connection.sshTunnel.enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Use a Databricks SSH tunnel for script execution. Requires Databricks CLI ≥ 0.269 and `databricks ssh setup --name <name>` to be configured. DBR 17+ only."
+          },
+          "catalystops.connection.sshTunnel.connectionName": {
+            "type": "string",
+            "default": "",
+            "description": "SSH connection name configured via `databricks ssh setup --name <name>`."
+          }
+        }
+      },
+      {
+        "title": "Code Analysis",
+        "properties": {
+          "catalystops.analysis.autoAnalyzeOnSave": {
+            "type": "boolean",
+            "default": false,
+            "description": "Automatically run local anti-pattern analysis when a PySpark file is saved."
+          },
+          "catalystops.analysis.enableLocalCodeAnalysis": {
+            "type": "boolean",
+            "default": true,
+            "description": "Enable local anti-pattern detection (no cluster required)."
+          },
+          "catalystops.analysis.enableRepeatedScanDetection": {
+            "type": "boolean",
+            "default": false,
+            "description": "Warn when the same source DataFrame is used multiple times without .cache() or .persist(). Disable if you see false positives in complex DAGs."
+          }
+        }
+      },
+      {
+        "title": "General",
+        "properties": {
+          "catalystops.mcp.enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Enable the CatalystOps MCP server for integration with Claude, Copilot, and other MCP clients. Restart VS Code after changing."
+          },
+          "catalystops.debug": {
+            "type": "boolean",
+            "default": false,
+            "description": "Enable debug logging — prints curl-equivalent commands for every Databricks API call to the Output panel."
+          }
         }
       }
-    },
+    ],
     "viewsContainers": {
       "activitybar": [
         {
@@ -230,6 +309,16 @@
         {
           "id": "catalystops.billingTree",
           "name": "Billing",
+          "icon": "media/icon-mono.svg"
+        },
+        {
+          "id": "catalystops.jobsTree",
+          "name": "Jobs",
+          "icon": "media/icon-mono.svg"
+        },
+        {
+          "id": "catalystops.clustersTree",
+          "name": "Clusters",
           "icon": "media/icon-mono.svg"
         }
       ]
@@ -304,6 +393,17 @@
             ]
           },
           {
+            "id": "catalystops.gettingStarted.jobs",
+            "title": "Analyze Historical Job Runs",
+            "description": "Inspect past Databricks job runs from the Jobs sidebar — no re-execution needed. CatalystOps reads Spark event logs to surface plan issues and downloads the source code with diagnostics applied.\n[Refresh Jobs](command:catalystops.refreshJobs)",
+            "media": {
+              "markdown": "media/walkthrough/08-jobs.md"
+            },
+            "completionEvents": [
+              "onCommand:catalystops.refreshJobs"
+            ]
+          },
+          {
             "id": "catalystops.gettingStarted.mcp",
             "title": "AI Integration via MCP",
             "description": "CatalystOps exposes a local MCP server so Claude, GitHub Copilot, and other AI assistants can analyze your code, read plan results, and query billing data.",
@@ -336,9 +436,29 @@
           "command": "catalystops.showPlanDag",
           "when": "view == catalystops.explainTree",
           "group": "navigation"
+        },
+        {
+          "command": "catalystops.refreshJobs",
+          "when": "view == catalystops.jobsTree",
+          "group": "navigation"
+        },
+        {
+          "command": "catalystops.refreshClusters",
+          "when": "view == catalystops.clustersTree",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
+        {
+          "command": "catalystops.connectClusterSsh",
+          "when": "view == catalystops.clustersTree && viewItem =~ /catalystops\\.clusterItem/",
+          "group": "inline@1"
+        },
+        {
+          "command": "catalystops.stopCluster",
+          "when": "view == catalystops.clustersTree && viewItem == catalystops.clusterItem.running",
+          "group": "inline@2"
+        },
         {
           "command": "catalystops.quickfix.broadcastHint",
           "when": "view == catalystops.explainTree && viewItem =~ /^join-(sortmerge|shuffled|cartesian)/",
