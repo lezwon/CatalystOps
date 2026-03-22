@@ -2,7 +2,7 @@
   "name": "catalystops",
   "displayName": "CatalystOps - PySpark Optimizer",
   "description": "Analyze PySpark code for performance issues using Catalyst execution plan analysis",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "publisher": "CatalystOps",
   "repository": {
     "type": "git",
@@ -406,6 +406,17 @@
             },
             "completionEvents": [
               "onCommand:catalystops.analyzeJobRun"
+            ]
+          },
+          {
+            "id": "catalystops.gettingStarted.sshConnect",
+            "title": "SSH into Databricks Clusters",
+            "description": "Connect to any Databricks cluster directly from the Clusters sidebar — auto-starts stopped clusters, fixes access mode, and opens VS Code Remote SSH in one click.\n[Refresh Clusters](command:catalystops.refreshClusters)",
+            "media": {
+              "markdown": "media/walkthrough/09-ssh-connect.md"
+            },
+            "completionEvents": [
+              "onCommand:catalystops.connectClusterSsh"
             ]
           },
           {

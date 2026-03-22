@@ -2,6 +2,13 @@
 
 All notable changes to CatalystOps are documented here.
 
+## [0.9.2]
+
+### Added
+- **Granular SSH telemetry** — tracks auto-start, scope pre-creation, access-mode fix flow, plan-not-supported, and alias-clear events for better usage visibility.
+
+---
+
 ## [0.9.1]
 
 ### Added

@@ -299,6 +299,41 @@ Click any job to trigger analysis of its most recent run.
 
 ---
 
+### Clusters Sidebar — One-Click SSH Connect (v0.9.1)
+
+The **Clusters** sidebar panel lists all Databricks interactive clusters in your workspace with their current state. From here you can SSH into any cluster without any manual CLI commands.
+
+**What the sidebar shows:**
+
+```
+CLUSTERS
+├── 🟢 my-etl-cluster          Running
+├── 🔴 ml-training             Terminated
+└── 🟡 dev-sandbox             Pending
+```
+
+**One-click SSH connect:**
+
+Click the SSH icon (📡) on any cluster to:
+
+1. **Auto-start** — if the cluster is stopped, CatalystOps starts it and waits (polling every 5 s, up to 10 minutes)
+2. **SSH setup** — runs `databricks ssh setup` automatically to write the SSH config
+3. **Access mode fix** — if the cluster requires Single User mode for SSH, CatalystOps offers to fix the access mode (and optionally upgrade to Spark 17.3 LTS), restarts the cluster, and retries setup automatically
+4. **Secret scope** — pre-creates the secret scope for the SSH tunnel keys on Standard-tier workspaces where the CLI cannot create scopes
+5. **Open Remote SSH** — opens a VS Code Remote SSH window for the cluster
+
+**Context menu actions (right-click a cluster):**
+
+| Action | Description |
+|--------|-------------|
+| Connect via SSH | Full one-click SSH flow |
+| Stop Cluster | Stops a running cluster (confirmation required) |
+| Reset SSH Host | Clears the cached SSH alias, forcing re-setup on next connect |
+
+> **Requirements**: Databricks CLI ≥ 0.269, VS Code Remote SSH extension, DBR 17+, Unity Catalog enabled.
+
+---
+
 ### Cluster Analysis — Catalyst Plan Inspection (Databricks Dry Run)
 
 When a Databricks connection is configured, CatalystOps submits a neutralized version of your script to the cluster or serverless compute and parses both the **physical** and **analyzed logical** execution plans.
@@ -525,6 +560,10 @@ The extension uses `ssh my-cluster python3` to execute analysis scripts directly
 | **CatalystOps: Refresh Billing Data** | — | Force a fresh billing query, bypassing the cache |
 | **CatalystOps: Refresh Jobs List** | — | Reload the Jobs sidebar panel from the workspace |
 | **CatalystOps: Analyze Job Run** | — | Analyze a historical job run (triggered by clicking a job in the sidebar) |
+| **Connect via SSH** | — | One-click SSH into a Databricks cluster (auto-starts stopped clusters, runs `databricks ssh setup`, opens VS Code Remote SSH) |
+| **Stop Cluster** | — | Stop a running cluster from the Clusters sidebar |
+| **Reset SSH Host** | — | Clear the cached SSH alias for a cluster so the next connect re-runs setup |
+| **CatalystOps: Refresh Clusters** | — | Reload the Clusters sidebar panel |
 
 ### Typical Workflow
 
@@ -550,6 +589,7 @@ The extension uses `ssh my-cluster python3` to execute analysis scripts directly
 | `catalystops.jobs.enabled` | `true` | Show the Jobs sidebar panel with workspace jobs and last-run status |
 | `catalystops.connection.sshTunnel.enabled` | `false` | Use Databricks SSH tunnel for script execution. Requires Databricks CLI ≥ 0.269 and DBR 17+ |
 | `catalystops.connection.sshTunnel.connectionName` | `""` | SSH connection name from `databricks ssh setup --name <name>` |
+| `catalystops.ssh.shutdownDelay` | `30m` | How long to keep a cluster alive after the SSH session closes (e.g. `10m`, `1h`). Passed as `--shutdown-delay` to `databricks ssh setup` |
 | `catalystops.analysis.autoAnalyzeOnSave` | `false` | Auto-analyze on save |
 | `catalystops.analysis.enableLocalCodeAnalysis` | `true` | Enable local anti-pattern detection |
 | `catalystops.analysis.enableRepeatedScanDetection` | `false` | Warn when a source DataFrame (`spark.read.*`, `spark.table`, `spark.sql`) is used 2+ times without `.cache()` or `.persist()`. Tracks aliases and derived DataFrames transitively. Disabled by default — enable if you want to audit scan reuse in complex pipelines. |
