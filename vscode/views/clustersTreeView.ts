@@ -70,10 +70,9 @@ export class ClusterItem extends vscode.TreeItem {
         this.cluster = cluster;
         const state = cluster.state;
         const isRunning = state === 'RUNNING' || state === 'PENDING' || state === 'RESTARTING' || state === 'RESIZING';
-        const isStopped = state === 'TERMINATED' || state === 'TERMINATING' || state === 'ERROR' || state === 'UNKNOWN';
         this.contextValue = isRunning
             ? 'catalystops.clusterItem.running'
-            : isStopped ? 'catalystops.clusterItem.stopped' : 'catalystops.clusterItem';
+            : 'catalystops.clusterItem';
         const workers = cluster.numWorkers !== undefined ? ` · ${cluster.numWorkers}w` : '';
         this.description = `${state.toLowerCase()}${workers}`;
         this.tooltip = [

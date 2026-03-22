@@ -144,7 +144,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 (item: unknown) => {
                     const cluster = item instanceof ClusterItem ? item.cluster : undefined;
                     if (!cluster) { return; }
-                    void connectClusterSsh(cluster, context);
+                    void connectClusterSsh(cluster, context, clustersTreeProvider);
                 }),
             vscode.commands.registerCommand('catalystops.startCluster',
                 (item: unknown) => {

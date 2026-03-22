@@ -100,11 +100,6 @@
         "icon": "$(remote)"
       },
       {
-        "command": "catalystops.startCluster",
-        "title": "Start Cluster",
-        "icon": "$(play)"
-      },
-      {
         "command": "catalystops.stopCluster",
         "title": "Stop Cluster",
         "icon": "$(debug-stop)"
@@ -460,13 +455,8 @@
       ],
       "view/item/context": [
         {
-          "command": "catalystops.startCluster",
-          "when": "view == catalystops.clustersTree && viewItem == catalystops.clusterItem.stopped",
-          "group": "inline@1"
-        },
-        {
           "command": "catalystops.connectClusterSsh",
-          "when": "view == catalystops.clustersTree && viewItem == catalystops.clusterItem.running",
+          "when": "view == catalystops.clustersTree && viewItem =~ /catalystops\\.clusterItem/",
           "group": "inline@1"
         },
         {

@@ -18,7 +18,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { getConnectionConfig } from '../config/settings';
-import { listClusters, startCluster, stopCluster, getClusterState, ClusterInfo } from '../databricks/clustersApi';
+import { listClusters, startCluster, stopCluster, getClusterState, getClusterSpec, editCluster, restartCluster, getCurrentUserEmail, ensureSshSecretScope, ClusterInfo, ClusterState } from '../databricks/clustersApi';
 import { ClustersTreeDataProvider } from '../views/clustersTreeView';
 import { logDebug, logError } from '../logger';
 import { sendEvent } from '../telemetry';
@@ -115,6 +115,132 @@ export async function stopClusterCommand(
     }
 }
 
+const MIN_SSH_SPARK_VERSION = 17;
+const RECOMMENDED_SPARK_VERSION = '17.3.x-scala2.13';
+
+/**
+ * Offer to auto-fix a cluster's access mode (and optionally Spark version) when
+ * `databricks ssh setup` rejects it. Restarts the cluster, waits for RUNNING,
+ * then retries setup.
+ */
+async function fixClusterAndRetry(
+    cluster: ClusterInfo,
+    config: import('../config/settings').DatabricksConnectionConfig,
+    profile: string,
+    preferredAlias: string,
+    provider: ClustersTreeDataProvider,
+    progress: vscode.Progress<{ message?: string; increment?: number }>,
+    aliasCache: Record<string, string>,
+    context: vscode.ExtensionContext,
+): Promise<void> {
+    // Fetch the full spec to inspect the current Spark version.
+    let clusterSpec: Record<string, unknown> = {};
+    let currentSpark = cluster.sparkVersion;
+    try {
+        const details = await getClusterSpec(config.host, config.token, cluster.clusterId);
+        clusterSpec = details.spec;
+        currentSpark = details.sparkVersion || currentSpark;
+    } catch {
+        // proceed with what we have
+    }
+
+    const majorVersion = parseInt((currentSpark ?? '').split('.')[0], 10);
+    const sparkNeedsUpgrade = isNaN(majorVersion) || majorVersion < MIN_SSH_SPARK_VERSION;
+    const sparkLabel = sparkNeedsUpgrade
+        ? ` and upgrade Spark to ${RECOMMENDED_SPARK_VERSION}`
+        : '';
+
+    const action = await vscode.window.showWarningMessage(
+        `CatalystOps: Cluster "${cluster.clusterName}" needs Single User access mode for SSH.` +
+        `${sparkNeedsUpgrade ? ` Its Spark version (${currentSpark}) is also below 17.0.` : ''}` +
+        ` Fix${sparkLabel} and restart now?`,
+        { modal: true },
+        'Fix & Restart',
+        'Open Cluster Settings',
+    );
+
+    if (action === 'Open Cluster Settings') {
+        void vscode.env.openExternal(vscode.Uri.parse(
+            `${config.host}#setting/clusters/${cluster.clusterId}/configuration`,
+        ));
+        return;
+    }
+    if (action !== 'Fix & Restart') { return; }
+
+    // Apply fixes
+    progress.report({ message: 'Updating cluster settings…' });
+    const updatedSpec: Record<string, unknown> = {
+        ...clusterSpec,
+        data_security_mode: 'SINGLE_USER',
+        ...(sparkNeedsUpgrade ? { spark_version: RECOMMENDED_SPARK_VERSION } : {}),
+    };
+    try {
+        await editCluster(config.host, config.token, cluster.clusterId, updatedSpec);
+        logDebug(`connectSsh: cluster edit applied (SINGLE_USER${sparkNeedsUpgrade ? ', spark=' + RECOMMENDED_SPARK_VERSION : ''})`);
+    } catch (editErr) {
+        void vscode.window.showErrorMessage(`CatalystOps: Failed to update cluster: ${editErr}`);
+        return;
+    }
+
+    // Restart
+    progress.report({ message: 'Restarting cluster…' });
+    try {
+        await restartCluster(config.host, config.token, cluster.clusterId);
+    } catch {
+        // If not running, start instead
+        await startCluster(config.host, config.token, cluster.clusterId);
+    }
+
+    // Poll until RUNNING
+    const deadline = Date.now() + 10 * 60 * 1_000;
+    let state: ClusterState = 'PENDING';
+    provider.updateClusterState(cluster.clusterId, 'PENDING');
+    while (state !== 'RUNNING' && state !== 'ERROR' && state !== 'TERMINATED') {
+        if (Date.now() > deadline) {
+            void vscode.window.showWarningMessage(
+                `CatalystOps: Cluster is still restarting. Try connecting again once it's Running.`,
+            );
+            return;
+        }
+        progress.report({ message: `Waiting for cluster to restart (${state.toLowerCase()})…` });
+        await sleep(5_000);
+        try {
+            state = await getClusterState(config.host, config.token, cluster.clusterId);
+            provider.updateClusterState(cluster.clusterId, state);
+        } catch { /* keep polling */ }
+    }
+    if (state !== 'RUNNING') {
+        void vscode.window.showErrorMessage(`CatalystOps: Cluster failed to restart (state: ${state}).`);
+        return;
+    }
+
+    // Retry ssh setup with the fixed cluster
+    progress.report({ message: 'Retrying SSH setup…' });
+    const retryResult = await runCommand('databricks', [
+        'ssh', 'setup', '--name', preferredAlias,
+        '--cluster', cluster.clusterId,
+        '--profile', profile,
+        '--auto-start-cluster', '--shutdown-delay', '30m',
+    ]);
+    if (retryResult.code !== 0) {
+        void vscode.window.showErrorMessage(
+            `CatalystOps: SSH setup still failed after fix: ${(retryResult.stderr || retryResult.stdout).substring(0, 200)}`,
+        );
+        return;
+    }
+    const newConfigs = listDatabricksSshConfigs();
+    const created = findConfigForCluster(cluster.clusterId, newConfigs);
+    if (created) {
+        aliasCache[cluster.clusterId] = created;
+        await context.globalState.update(ALIAS_CACHE_KEY, aliasCache);
+        logDebug(`connectSsh: post-fix SSH alias "${created}" cached`);
+        sendEvent('cluster/ssh_fixed_and_connected');
+        await openRemoteSshWindow(created, cluster.clusterName);
+    } else {
+        void vscode.window.showErrorMessage(`CatalystOps: SSH setup succeeded but no config found for ${cluster.clusterId}.`);
+    }
+}
+
 export async function refreshClustersList(provider: ClustersTreeDataProvider): Promise<void> {
     const config = getConnectionConfig();
     if (!config) {
@@ -143,6 +269,7 @@ const DATABRICKS_SSH_CONFIGS_DIR = path.join(os.homedir(), '.databricks', 'ssh-t
 export async function connectClusterSsh(
     cluster: ClusterInfo,
     context: vscode.ExtensionContext,
+    provider: ClustersTreeDataProvider,
 ): Promise<void> {
     const config = getConnectionConfig();
     if (!config) {
@@ -177,8 +304,56 @@ export async function connectClusterSsh(
         cancellable: false,
     }, async (progress) => {
         try {
-            // Step 1: Resolve SSH alias
-            // Priority: cached > existing Databricks config > run setup > QuickPick
+            // Step 1: Ensure cluster is running before attempting SSH setup/connect
+            const CLUSTER_START_TIMEOUT_MS = 10 * 60 * 1_000; // 10 minutes
+            const isActive = (s: string) => s === 'RUNNING' || s === 'PENDING' || s === 'RESTARTING' || s === 'RESIZING';
+
+            if (!isActive(cluster.state)) {
+                progress.report({ message: 'Starting cluster…', increment: 10 });
+                try {
+                    await startCluster(config.host, config.token, cluster.clusterId);
+                    logDebug(`connectSsh: start requested for ${cluster.clusterId}, polling for RUNNING`);
+                } catch (startErr) {
+                    // Cluster may already be starting — ignore and poll anyway
+                    logDebug(`connectSsh: start call error (may already be starting): ${startErr}`);
+                }
+
+                const deadline = Date.now() + CLUSTER_START_TIMEOUT_MS;
+                // Treat as PENDING immediately — cluster.state is still TERMINATED
+                // from the tree cache and the while loop would exit early otherwise.
+                let state: ClusterState = 'PENDING';
+                provider.updateClusterState(cluster.clusterId, 'PENDING');
+                while (state !== 'RUNNING' && state !== 'ERROR' && state !== 'TERMINATED') {
+                    if (Date.now() > deadline) {
+                        void vscode.window.showWarningMessage(
+                            `CatalystOps: Cluster "${cluster.clusterName}" is still starting. ` +
+                            `Try connecting again once it reaches Running state.`,
+                        );
+                        provider.updateClusterState(cluster.clusterId, state);
+                        return;
+                    }
+                    progress.report({ message: `Waiting for cluster to start (${state.toLowerCase()})…` });
+                    await sleep(5_000);
+                    try {
+                        state = await getClusterState(config.host, config.token, cluster.clusterId);
+                        provider.updateClusterState(cluster.clusterId, state);
+                        logDebug(`connectSsh: cluster state=${state}`);
+                    } catch {
+                        // network hiccup — keep polling
+                    }
+                }
+
+                if (state !== 'RUNNING') {
+                    void vscode.window.showErrorMessage(
+                        `CatalystOps: Cluster "${cluster.clusterName}" failed to start (state: ${state}).`,
+                    );
+                    return;
+                }
+                progress.report({ message: 'Cluster running…', increment: 10 });
+            }
+
+            // Step 2: Resolve SSH alias
+            // Priority: cached > existing Databricks config > run setup
             progress.report({ message: 'Resolving SSH alias…', increment: 15 });
 
             // Clean up any stale broken entry our old code may have written
@@ -246,20 +421,7 @@ export async function connectClusterSsh(
                                 `Contact your Databricks account team to enable it, or use a workspace where SSH is included.`,
                             );
                         } else if (/dedicated access mode|single.?user/i.test(errText)) {
-                            void vscode.window.showErrorMessage(
-                                `CatalystOps: SSH setup failed — cluster "${cluster.clusterName}" must use Single User access mode. ` +
-                                `If you already set it, restart the cluster and try again.`,
-                                'Open Cluster Settings',
-                            ).then(action => {
-                                if (action === 'Open Cluster Settings') {
-                                    const config2 = getConnectionConfig();
-                                    if (config2) {
-                                        void vscode.env.openExternal(vscode.Uri.parse(
-                                            `${config2.host}#setting/clusters/${cluster.clusterId}/configuration`,
-                                        ));
-                                    }
-                                }
-                            });
+                            await fixClusterAndRetry(cluster, config, profile, preferredAlias, provider, progress, aliasCache, context);
                         } else {
                             void vscode.window.showErrorMessage(
                                 `CatalystOps: databricks ssh setup failed (exit ${setupResult.code}).\n${errText.substring(0, 300)}\n\n` +
@@ -293,7 +455,29 @@ export async function connectClusterSsh(
                 logDebug(`connectSsh: using cached alias "${sshAlias}"`);
             }
 
-            // Step 2: Ensure Remote SSH connect timeout is long enough for Databricks clusters.
+            // Step 3: Pre-create the SSH secrets scope so `databricks ssh connect` doesn't fail
+            // on Standard-tier workspaces that block scope creation without initial_manage_principal.
+            // Scope name: {email}-{clusterId}-ssh-tunnel-keys (derived from CLI debug traces).
+            // Also delete any stale key file we may have generated manually for this cluster.
+            try {
+                const email = await getCurrentUserEmail(config.host, config.token);
+                if (email) {
+                    await ensureSshSecretScope(config.host, config.token, email, cluster.clusterId);
+                    logDebug(`connectSsh: ensured SSH secret scope for ${email} / ${cluster.clusterId}`);
+                }
+            } catch (scopeErr) {
+                logDebug(`connectSsh: scope pre-create warning: ${scopeErr}`);
+            }
+            // Remove stale manually-generated key so the CLI can write the correct one.
+            const staleKey = path.join(os.homedir(), '.databricks', 'ssh-tunnel-keys', cluster.clusterId);
+            for (const f of [staleKey, `${staleKey}.pub`]) {
+                if (fs.existsSync(f)) {
+                    fs.rmSync(f);
+                    logDebug(`connectSsh: removed stale key file ${f}`);
+                }
+            }
+
+            // Step 4: Ensure Remote SSH connect timeout is long enough for Databricks clusters.
             // Databricks clusters can take 2–3 minutes to start an SSH server after the job
             // is submitted.  The VS Code default (15 s) is too short.
             const remoteSshConfig = vscode.workspace.getConfiguration('remote.SSH');
@@ -303,7 +487,7 @@ export async function connectClusterSsh(
                 logDebug(`connectSsh: raised remote.SSH.connectTimeout from ${currentTimeout}s to 180s`);
             }
 
-            // Step 3: Open VS Code Remote SSH
+            // Step 4: Open VS Code Remote SSH
             progress.report({ message: `Opening "${sshAlias}"…`, increment: 55 });
             const opened = await openRemoteSshWindow(sshAlias, cluster.clusterName);
 
