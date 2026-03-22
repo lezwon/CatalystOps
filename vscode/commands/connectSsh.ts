@@ -40,6 +40,7 @@ export async function clearSshAlias(
     delete aliasCache[cluster.clusterId];
     await context.globalState.update(ALIAS_CACHE_KEY, aliasCache);
     logDebug(`connectSsh: cleared cached alias "${existing}" for cluster ${cluster.clusterId}`);
+    sendEvent('cluster/ssh_alias_cleared');
     void vscode.window.showInformationMessage(
         `CatalystOps: Cleared SSH alias "${existing}" for "${cluster.clusterName}". Next connect will re-run setup.`,
     );
@@ -150,6 +151,8 @@ async function fixClusterAndRetry(
         ? ` and upgrade Spark to ${RECOMMENDED_SPARK_VERSION}`
         : '';
 
+    sendEvent('cluster/ssh_fix_offered', { sparkNeedsUpgrade: String(sparkNeedsUpgrade) });
+
     const action = await vscode.window.showWarningMessage(
         `CatalystOps: Cluster "${cluster.clusterName}" needs Single User access mode for SSH.` +
         `${sparkNeedsUpgrade ? ` Its Spark version (${currentSpark}) is also below 17.0.` : ''}` +
@@ -160,12 +163,17 @@ async function fixClusterAndRetry(
     );
 
     if (action === 'Open Cluster Settings') {
+        sendEvent('cluster/ssh_fix_declined', { reason: 'open_settings' });
         void vscode.env.openExternal(vscode.Uri.parse(
             `${config.host}#setting/clusters/${cluster.clusterId}/configuration`,
         ));
         return;
     }
-    if (action !== 'Fix & Restart') { return; }
+    if (action !== 'Fix & Restart') {
+        sendEvent('cluster/ssh_fix_declined', { reason: 'dismissed' });
+        return;
+    }
+    sendEvent('cluster/ssh_fix_accepted', { sparkNeedsUpgrade: String(sparkNeedsUpgrade) });
 
     // Apply fixes
     progress.report({ message: 'Updating cluster settings…' });
@@ -344,11 +352,13 @@ export async function connectClusterSsh(
                 }
 
                 if (state !== 'RUNNING') {
+                    sendEvent('cluster/ssh_start_timeout', { finalState: state });
                     void vscode.window.showErrorMessage(
                         `CatalystOps: Cluster "${cluster.clusterName}" failed to start (state: ${state}).`,
                     );
                     return;
                 }
+                sendEvent('cluster/ssh_auto_started');
                 progress.report({ message: 'Cluster running…', increment: 10 });
             }
 
@@ -398,6 +408,7 @@ export async function connectClusterSsh(
 
                 if (alreadySetUp) {
                     logDebug(`connectSsh: found existing Databricks SSH config "${alreadySetUp}" for cluster ${cluster.clusterId}`);
+                    sendEvent('cluster/ssh_already_setup');
                     sshAlias = alreadySetUp;
                 } else {
                     // Run databricks ssh setup — it writes ~/.databricks/ssh-tunnel-configs/<name>
@@ -416,6 +427,7 @@ export async function connectClusterSsh(
                     if (setupResult.code !== 0) {
                         const errText = (setupResult.stderr || setupResult.stdout).trim();
                         if (/not allowed in your current.*(plan|tier)|ssh.*not.*supported|plan.*does not (include|support).*ssh/i.test(errText)) {
+                            sendEvent('cluster/ssh_plan_not_supported');
                             void vscode.window.showErrorMessage(
                                 `CatalystOps: SSH is not available in this Databricks workspace's current plan. ` +
                                 `Contact your Databricks account team to enable it, or use a workspace where SSH is included.`,
@@ -463,6 +475,7 @@ export async function connectClusterSsh(
                 const email = await getCurrentUserEmail(config.host, config.token);
                 if (email) {
                     await ensureSshSecretScope(config.host, config.token, email, cluster.clusterId);
+                    sendEvent('cluster/ssh_scope_precreated');
                     logDebug(`connectSsh: ensured SSH secret scope for ${email} / ${cluster.clusterId}`);
                 }
             } catch (scopeErr) {

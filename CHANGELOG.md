@@ -2,6 +2,23 @@
 
 All notable changes to CatalystOps are documented here.
 
+## [0.9.1]
+
+### Added
+- **One-click SSH connect** — clicking "Connect via SSH" on a stopped cluster now starts it automatically, polls state every 5 s with live progress, and connects once it reaches Running. No manual start required.
+- **Auto-fix cluster for SSH** — when `databricks ssh setup` fails due to wrong access mode, the extension offers to set Single User mode and optionally upgrade Spark to 17.3 LTS, then restarts and retries setup automatically.
+- **Secret scope pre-creation** — on Standard-tier workspaces that block secret scope creation, the extension pre-creates the scope (`{email}-{clusterId}-ssh-tunnel-keys`) with the correct permissions before connecting, preventing the CLI tunnel from failing.
+- **Reset SSH Host** — right-click any cluster → Reset SSH Host to clear the cached alias and force re-setup on next connect.
+
+### Fixed
+- Cluster names with special characters (apostrophes, etc.) no longer break `databricks ssh setup`.
+- Selecting a different cluster no longer reuses the previous cluster's SSH config — alias lookup now matches by cluster ID in file contents, not by name.
+- `remote.SSH.connectTimeout` is automatically raised to 180 s to accommodate Databricks cluster startup time.
+- Clearer error messages for unsupported workspace plans and access mode mismatches.
+- DAG view now correctly renders plans whose operator tree is entirely under `== Initial Plan ==`.
+
+---
+
 ## [0.9.0]
 
 ### Added
