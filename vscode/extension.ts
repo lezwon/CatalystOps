@@ -24,7 +24,7 @@ import { IssuesTreeDataProvider } from './views/issuesTreeView';
 import { BillingTreeDataProvider } from './views/billingTreeView';
 import { JobsTreeDataProvider, JobItem } from './views/jobsTreeView';
 import { refreshJobsList, analyzeJobRun as analyzeJobRunCmd } from './commands/analyzeJobRun';
-import { refreshClustersList, connectClusterSsh, stopClusterCommand } from './commands/connectSsh';
+import { refreshClustersList, connectClusterSsh, startClusterCommand, stopClusterCommand, clearSshAlias } from './commands/connectSsh';
 import { ClustersTreeDataProvider, ClusterItem } from './views/clustersTreeView';
 import { ExplainTreeDataProvider, PlanNodeItem } from './views/explainTreeView';
 import { showDagWebview, disposeDagWebview } from './views/dagWebview';
@@ -146,11 +146,23 @@ export function activate(context: vscode.ExtensionContext): void {
                     if (!cluster) { return; }
                     void connectClusterSsh(cluster, context);
                 }),
+            vscode.commands.registerCommand('catalystops.startCluster',
+                (item: unknown) => {
+                    const cluster = item instanceof ClusterItem ? item.cluster : undefined;
+                    if (!cluster) { return; }
+                    void startClusterCommand(cluster, clustersTreeProvider);
+                }),
             vscode.commands.registerCommand('catalystops.stopCluster',
                 (item: unknown) => {
                     const cluster = item instanceof ClusterItem ? item.cluster : undefined;
                     if (!cluster) { return; }
                     void stopClusterCommand(cluster, clustersTreeProvider);
+                }),
+            vscode.commands.registerCommand('catalystops.clearSshAlias',
+                (item: unknown) => {
+                    const cluster = item instanceof ClusterItem ? item.cluster : undefined;
+                    if (!cluster) { return; }
+                    void clearSshAlias(cluster, context);
                 }),
 
             // Explain Plan + DAG commands

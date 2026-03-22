@@ -632,10 +632,10 @@ function generateHtml(roots: PlanNode[]): string {
 
     // Legend
     const legendItems = [
-        { color: '#e53e3e', label: 'Critical (SortMergeJoin, CartesianProduct)' },
-        { color: '#dd6b20', label: 'Warning (Exchange, SortAggregate)' },
-        { color: '#4299e1', label: 'Info (BroadcastHashJoin)' },
-        { color: '#38a169', label: 'OK (FileScan, Filter, Project)' },
+        { color: '#e53e3e', label: 'Critical (Sort-Merge Join, Cartesian Product, Nested Join)' },
+        { color: '#dd6b20', label: 'Warning (Shuffle / Exchange, Aggregate / SortAggregate)' },
+        { color: '#4299e1', label: 'Info (Hash Join)' },
+        { color: '#38a169', label: 'OK (Read / FileScan, Filter, Select)' },
     ];
     const legendSvg = legendItems.map((item, i) =>
         `<g transform="translate(10,${i * 22})">

@@ -291,6 +291,9 @@ function extractDetails(rawOperator: string, content: string): string {
 
 let nodeCounter = 0;
 
+// Regex matching real operator tokens — used to detect whether a Final Plan section exists.
+const REAL_OPERATOR_RE = /(?:FileScan|PhotonScan|\bScan\s+(?:parquet|delta|orc|json|csv)\b|SortMergeJoin|BroadcastHashJoin|BroadcastNestedLoopJoin|Exchange\b|HashAggregate|SortAggregate)/i;
+
 function buildTree(
     physicalPlan: string,
     planIssues: PlanIssue[],
@@ -299,11 +302,19 @@ function buildTree(
 ): PlanNode[] {
     const roots: PlanNode[] = [];
     const stack: (PlanNode | undefined)[] = [];
+
+    // Only skip the Initial Plan section when a real Final Plan exists before it.
+    // Plans where the entire body is under == Initial Plan == should be analysed.
+    const initialPlanStart = physicalPlan.search(/==\s*Initial Plan\s*==/i);
+    const hasFinalPlan = initialPlanStart > -1
+        ? REAL_OPERATOR_RE.test(physicalPlan.substring(0, initialPlanStart))
+        : false;
+
     let inInitialPlan = false;
 
     for (const line of physicalPlan.split('\n')) {
         if (/==\s*Initial Plan\s*==/i.test(line)) { inInitialPlan = true; }
-        if (inInitialPlan) { continue; }
+        if (inInitialPlan && hasFinalPlan) { continue; }
 
         const parsed = parseLine(line);
         if (!parsed) { continue; }

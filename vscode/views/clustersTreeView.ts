@@ -23,6 +23,14 @@ export class ClustersTreeDataProvider implements vscode.TreeDataProvider<Cluster
         this._onDidChangeTreeData.fire(undefined);
     }
 
+    updateClusterState(clusterId: string, state: ClusterState): void {
+        const cluster = this.clusters.find(c => c.clusterId === clusterId);
+        if (cluster) {
+            cluster.state = state;
+            this._onDidChangeTreeData.fire(undefined);
+        }
+    }
+
     setLoading(loading: boolean): void {
         this.loading = loading;
         if (loading) { this.errorMessage = null; }
@@ -61,8 +69,11 @@ export class ClusterItem extends vscode.TreeItem {
         super(cluster.clusterName, vscode.TreeItemCollapsibleState.None);
         this.cluster = cluster;
         const state = cluster.state;
-        const isActive = state === 'RUNNING' || state === 'PENDING' || state === 'RESTARTING' || state === 'RESIZING';
-        this.contextValue = isActive ? 'catalystops.clusterItem.running' : 'catalystops.clusterItem';
+        const isRunning = state === 'RUNNING' || state === 'PENDING' || state === 'RESTARTING' || state === 'RESIZING';
+        const isStopped = state === 'TERMINATED' || state === 'TERMINATING' || state === 'ERROR' || state === 'UNKNOWN';
+        this.contextValue = isRunning
+            ? 'catalystops.clusterItem.running'
+            : isStopped ? 'catalystops.clusterItem.stopped' : 'catalystops.clusterItem';
         const workers = cluster.numWorkers !== undefined ? ` · ${cluster.numWorkers}w` : '';
         this.description = `${state.toLowerCase()}${workers}`;
         this.tooltip = [

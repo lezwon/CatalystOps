@@ -100,9 +100,19 @@
         "icon": "$(remote)"
       },
       {
+        "command": "catalystops.startCluster",
+        "title": "Start Cluster",
+        "icon": "$(play)"
+      },
+      {
         "command": "catalystops.stopCluster",
         "title": "Stop Cluster",
         "icon": "$(debug-stop)"
+      },
+      {
+        "command": "catalystops.clearSshAlias",
+        "title": "Reset SSH Host",
+        "icon": "$(trash)"
       },
       {
         "command": "catalystops.jobItemClicked",
@@ -450,14 +460,24 @@
       ],
       "view/item/context": [
         {
+          "command": "catalystops.startCluster",
+          "when": "view == catalystops.clustersTree && viewItem == catalystops.clusterItem.stopped",
+          "group": "inline@1"
+        },
+        {
           "command": "catalystops.connectClusterSsh",
-          "when": "view == catalystops.clustersTree && viewItem =~ /catalystops\\.clusterItem/",
+          "when": "view == catalystops.clustersTree && viewItem == catalystops.clusterItem.running",
           "group": "inline@1"
         },
         {
           "command": "catalystops.stopCluster",
           "when": "view == catalystops.clustersTree && viewItem == catalystops.clusterItem.running",
           "group": "inline@2"
+        },
+        {
+          "command": "catalystops.clearSshAlias",
+          "when": "view == catalystops.clustersTree && viewItem =~ /catalystops\\.clusterItem/",
+          "group": "1_cluster@1"
         },
         {
           "command": "catalystops.quickfix.broadcastHint",

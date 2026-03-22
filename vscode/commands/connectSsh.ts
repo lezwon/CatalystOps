@@ -18,7 +18,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { getConnectionConfig } from '../config/settings';
-import { listClusters, stopCluster, ClusterInfo } from '../databricks/clustersApi';
+import { listClusters, startCluster, stopCluster, getClusterState, ClusterInfo } from '../databricks/clustersApi';
 import { ClustersTreeDataProvider } from '../views/clustersTreeView';
 import { logDebug, logError } from '../logger';
 import { sendEvent } from '../telemetry';
@@ -26,6 +26,65 @@ import { sendEvent } from '../telemetry';
 // Minimum Databricks CLI version required for SSH setup
 const MIN_CLI_MAJOR = 0;
 const MIN_CLI_MINOR = 269;
+
+export async function clearSshAlias(
+    cluster: ClusterInfo,
+    context: vscode.ExtensionContext,
+): Promise<void> {
+    const aliasCache = context.globalState.get<Record<string, string>>(ALIAS_CACHE_KEY, {});
+    const existing = aliasCache[cluster.clusterId];
+    if (!existing) {
+        void vscode.window.showInformationMessage(`CatalystOps: No cached SSH alias for "${cluster.clusterName}".`);
+        return;
+    }
+    delete aliasCache[cluster.clusterId];
+    await context.globalState.update(ALIAS_CACHE_KEY, aliasCache);
+    logDebug(`connectSsh: cleared cached alias "${existing}" for cluster ${cluster.clusterId}`);
+    void vscode.window.showInformationMessage(
+        `CatalystOps: Cleared SSH alias "${existing}" for "${cluster.clusterName}". Next connect will re-run setup.`,
+    );
+}
+
+const POLL_INTERVAL_MS = 5_000;
+const POLL_TIMEOUT_MS  = 10 * 60 * 1_000; // 10 minutes
+
+export async function startClusterCommand(
+    cluster: ClusterInfo,
+    provider: ClustersTreeDataProvider,
+): Promise<void> {
+    const config = getConnectionConfig();
+    if (!config) {
+        void vscode.window.showErrorMessage('CatalystOps: Databricks not configured. Run "Configure Connection" first.');
+        return;
+    }
+    try {
+        await startCluster(config.host, config.token, cluster.clusterId);
+        sendEvent('cluster/start', { clusterState: cluster.state });
+        logDebug(`connectSsh: start requested for ${cluster.clusterId}, beginning state poll`);
+
+        // Poll state every 5 s and update the tree live until the cluster is running or errors.
+        const deadline = Date.now() + POLL_TIMEOUT_MS;
+        const poll = async (): Promise<void> => {
+            if (Date.now() > deadline) { return; }
+            try {
+                const state = await getClusterState(config.host, config.token, cluster.clusterId);
+                provider.updateClusterState(cluster.clusterId, state);
+                logDebug(`connectSsh: poll state=${state} for ${cluster.clusterId}`);
+                if (state === 'RUNNING' || state === 'ERROR' || state === 'TERMINATED') { return; }
+                await sleep(POLL_INTERVAL_MS);
+                return poll();
+            } catch {
+                // network hiccup — retry
+                await sleep(POLL_INTERVAL_MS);
+                return poll();
+            }
+        };
+        void poll();
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        void vscode.window.showErrorMessage(`CatalystOps: Failed to start cluster: ${message}`);
+    }
+}
 
 export async function stopClusterCommand(
     cluster: ClusterInfo,
@@ -147,16 +206,23 @@ export async function connectClusterSsh(
                 const vsConfig = vscode.workspace.getConfiguration('catalystops');
                 const profile = vsConfig.get<string>('databricks.profile', 'DEFAULT');
                 const shutdownDelay = vsConfig.get<string>('ssh.shutdownDelay', '30m');
-                const preferredAlias = cluster.clusterName.replace(/\s+/g, '_').toLowerCase();
+                // Sanitize: lowercase, spaces → underscore, drop anything not alphanumeric/hyphen/underscore.
+                // This avoids shell quoting issues (e.g. apostrophes in cluster names).
+                const preferredAlias = cluster.clusterName
+                    .toLowerCase()
+                    .replace(/\s+/g, '_')
+                    .replace(/[^a-z0-9_-]/g, '')
+                    .replace(/^[-_]+|[-_]+$/g, '') // trim leading/trailing separators
+                    || `cluster-${cluster.clusterId.slice(0, 8)}`; // fallback if name is all special chars
 
-                // Check if the CLI already set this up (config exists in ~/.databricks/ssh-tunnel-configs/)
+                // Check if the CLI already set this up for THIS specific cluster.
+                // Match by cluster ID inside the file content — not just by alias name —
+                // so selecting a different cluster never reuses the wrong config.
                 const existingDatabricksConfigs = listDatabricksSshConfigs();
-                const alreadySetUp = existingDatabricksConfigs.find(
-                    n => n === preferredAlias || n.includes(cluster.clusterId),
-                );
+                const alreadySetUp = findConfigForCluster(cluster.clusterId, existingDatabricksConfigs);
 
                 if (alreadySetUp) {
-                    logDebug(`connectSsh: found existing Databricks SSH config "${alreadySetUp}"`);
+                    logDebug(`connectSsh: found existing Databricks SSH config "${alreadySetUp}" for cluster ${cluster.clusterId}`);
                     sshAlias = alreadySetUp;
                 } else {
                     // Run databricks ssh setup — it writes ~/.databricks/ssh-tunnel-configs/<name>
@@ -172,29 +238,51 @@ export async function connectClusterSsh(
                     ]);
                     logDebug(`connectSsh: setup code=${setupResult.code} out=${setupResult.stdout.substring(0, 200)} err=${setupResult.stderr.substring(0, 300)}`);
 
-                    // Check ~/.databricks/ssh-tunnel-configs/ for the new entry
+                    if (setupResult.code !== 0) {
+                        const errText = (setupResult.stderr || setupResult.stdout).trim();
+                        if (/not allowed in your current.*(plan|tier)|ssh.*not.*supported|plan.*does not (include|support).*ssh/i.test(errText)) {
+                            void vscode.window.showErrorMessage(
+                                `CatalystOps: SSH is not available in this Databricks workspace's current plan. ` +
+                                `Contact your Databricks account team to enable it, or use a workspace where SSH is included.`,
+                            );
+                        } else if (/dedicated access mode|single.?user/i.test(errText)) {
+                            void vscode.window.showErrorMessage(
+                                `CatalystOps: SSH setup failed — cluster "${cluster.clusterName}" must use Single User access mode. ` +
+                                `If you already set it, restart the cluster and try again.`,
+                                'Open Cluster Settings',
+                            ).then(action => {
+                                if (action === 'Open Cluster Settings') {
+                                    const config2 = getConnectionConfig();
+                                    if (config2) {
+                                        void vscode.env.openExternal(vscode.Uri.parse(
+                                            `${config2.host}#setting/clusters/${cluster.clusterId}/configuration`,
+                                        ));
+                                    }
+                                }
+                            });
+                        } else {
+                            void vscode.window.showErrorMessage(
+                                `CatalystOps: databricks ssh setup failed (exit ${setupResult.code}).\n${errText.substring(0, 300)}\n\n` +
+                                `Run manually: databricks ssh setup --name ${preferredAlias} --cluster ${cluster.clusterId} --profile ${profile}`,
+                            );
+                        }
+                        return;
+                    }
+
+                    // Find the newly created config by reading file contents — the CLI may have
+                    // used a slightly different name than preferredAlias.
                     const newConfigs = listDatabricksSshConfigs();
-                    const created = newConfigs.find(n => n === preferredAlias || n.includes(cluster.clusterId));
+                    const created = findConfigForCluster(cluster.clusterId, newConfigs);
 
                     if (created) {
-                        logDebug(`connectSsh: CLI created config "${created}"`);
+                        logDebug(`connectSsh: CLI created config "${created}" for cluster ${cluster.clusterId}`);
                         sshAlias = created;
                     } else {
-                        // Setup may have failed or used a different name — show all known aliases
-                        const choices = newConfigs.length > 0 ? newConfigs : readSshHosts();
-                        if (choices.length === 0) {
-                            void vscode.window.showErrorMessage(
-                                `CatalystOps: Could not find an SSH config after setup.\n` +
-                                `Run manually: databricks ssh setup --name <alias> --cluster ${cluster.clusterId} --profile ${profile}`,
-                            );
-                            return;
-                        }
-                        const picked = await vscode.window.showQuickPick(choices, {
-                            title: `Which SSH host connects to "${cluster.clusterName}"?`,
-                            placeHolder: 'Select the alias from ~/.databricks/ssh-tunnel-configs or ~/.ssh/config',
-                        });
-                        if (!picked) { return; }
-                        sshAlias = picked;
+                        void vscode.window.showErrorMessage(
+                            `CatalystOps: SSH setup succeeded but no config was found for cluster ${cluster.clusterId}.\n` +
+                            `Run manually: databricks ssh setup --name ${preferredAlias} --cluster ${cluster.clusterId} --profile ${profile}`,
+                        );
+                        return;
                     }
                 }
 
@@ -205,7 +293,17 @@ export async function connectClusterSsh(
                 logDebug(`connectSsh: using cached alias "${sshAlias}"`);
             }
 
-            // Step 2: Open VS Code Remote SSH
+            // Step 2: Ensure Remote SSH connect timeout is long enough for Databricks clusters.
+            // Databricks clusters can take 2–3 minutes to start an SSH server after the job
+            // is submitted.  The VS Code default (15 s) is too short.
+            const remoteSshConfig = vscode.workspace.getConfiguration('remote.SSH');
+            const currentTimeout = remoteSshConfig.get<number>('connectTimeout', 15);
+            if (currentTimeout < 180) {
+                await remoteSshConfig.update('connectTimeout', 180, vscode.ConfigurationTarget.Global);
+                logDebug(`connectSsh: raised remote.SSH.connectTimeout from ${currentTimeout}s to 180s`);
+            }
+
+            // Step 3: Open VS Code Remote SSH
             progress.report({ message: `Opening "${sshAlias}"…`, increment: 55 });
             const opened = await openRemoteSshWindow(sshAlias, cluster.clusterName);
 
@@ -230,6 +328,23 @@ function listDatabricksSshConfigs(): string[] {
         const full = path.join(DATABRICKS_SSH_CONFIGS_DIR, f);
         return fs.statSync(full).isFile();
     });
+}
+
+/**
+ * Find the SSH alias (config file name) that actually references a given cluster ID.
+ * Reads file contents so we match by cluster ID, not just alias name — prevents
+ * connecting to the wrong cluster when two clusters share a similar name.
+ */
+function findConfigForCluster(clusterId: string, aliases: string[]): string | undefined {
+    for (const alias of aliases) {
+        try {
+            const content = fs.readFileSync(path.join(DATABRICKS_SSH_CONFIGS_DIR, alias), 'utf-8');
+            if (content.includes(clusterId)) { return alias; }
+        } catch {
+            // unreadable file — skip
+        }
+    }
+    return undefined;
 }
 
 /** Remove a Host block from ~/.ssh/config by alias (cleans up stale entries). */
