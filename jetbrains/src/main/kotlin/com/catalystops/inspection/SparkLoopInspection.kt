@@ -13,6 +13,28 @@ import com.jetbrains.python.psi.PyWhileStatement
 
 class SparkLoopInspection : LocalInspectionTool() {
 
+    override fun getStaticDescription(): String = """
+        <html>
+        <body>
+        <p><b>CatalystOps — PySpark Loop Inspection</b></p>
+        <p>Detects Spark operations placed inside loops that cause plan explosion or excessive job submissions.</p>
+
+        <h3>CODE_WITHCOL_LOOP_001 — withColumn() inside a loop</h3>
+        <p>withColumn() called inside a loop creates a new query plan node per iteration. On large loops this
+        causes query plan explosion and very slow planning time.</p>
+        <pre>
+# Instead of:
+for col_name in columns:
+    df = df.withColumn(col_name, transform(col(col_name)))
+
+# Use a single select():
+exprs = [transform(col(c)).alias(c) for c in columns]
+df = df.select(*exprs)
+        </pre>
+        </body>
+        </html>
+    """.trimIndent()
+
     override fun buildVisitor(holder: ProblemsHolder, isOnTheFly: Boolean): PsiElementVisitor =
         object : PyElementVisitor() {
             override fun visitPyCallExpression(node: PyCallExpression) {

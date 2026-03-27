@@ -90,5 +90,9 @@
       icon="/icons/catalystops.svg"/>
 
     <postStartupActivity implementation="com.catalystops.telemetry.PluginStartupActivity"/>
+
+    <lang.documentationProvider language="Python"
+      implementationClass="com.catalystops.documentation.CatalystOpsDocumentationProvider"
+      order="first"/>
   </extensions>
 </idea-plugin>

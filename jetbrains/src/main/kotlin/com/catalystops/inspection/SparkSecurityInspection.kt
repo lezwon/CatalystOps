@@ -12,6 +12,29 @@ import com.jetbrains.python.psi.PyStringLiteralExpression
 
 class SparkSecurityInspection : LocalInspectionTool() {
 
+    override fun getStaticDescription(): String = """
+        <html>
+        <body>
+        <p><b>CatalystOps — PySpark Security Inspection</b></p>
+        <p>Detects security vulnerabilities in PySpark code.</p>
+
+        <h3>CODE_SQL_INJECT_001 — SQL injection via f-string</h3>
+        <p>spark.sql() called with an f-string can inject arbitrary SQL if the interpolated values come
+        from user input. Use parameterised queries or sanitise inputs.</p>
+        <pre>
+# Dangerous — SQL injection risk:
+user_id = request.get("user_id")
+spark.sql(f"SELECT * FROM users WHERE id = {user_id}")
+
+# Safe alternatives:
+# 1. Use spark.sql with proper sanitisation
+# 2. Use DataFrame API instead:
+df.filter(col("id") == user_id)
+        </pre>
+        </body>
+        </html>
+    """.trimIndent()
+
     override fun buildVisitor(holder: ProblemsHolder, isOnTheFly: Boolean): PsiElementVisitor =
         object : PyElementVisitor() {
             override fun visitPyCallExpression(node: PyCallExpression) {
@@ -22,7 +45,6 @@ class SparkSecurityInspection : LocalInspectionTool() {
                 val arg = node.argumentList?.arguments?.firstOrNull() ?: return
                 val text = arg.text
 
-                // Detect f-string argument: starts with f"/F" prefix
                 val isFString = text.startsWith("f\"") || text.startsWith("f'") ||
                     text.startsWith("F\"") || text.startsWith("F'") ||
                     arg is PyFormattedStringElement ||

@@ -11,6 +11,26 @@ import com.jetbrains.python.psi.PyReferenceExpression
 
 class SparkWindowInspection : LocalInspectionTool() {
 
+    override fun getStaticDescription(): String = """
+        <html>
+        <body>
+        <p><b>CatalystOps — PySpark Window Inspection</b></p>
+        <p>Detects Window function usage patterns that cause a single-partition bottleneck.</p>
+
+        <h3>CODE_WINDOW_001 — Window.orderBy() without partitionBy()</h3>
+        <p>Window.orderBy() without partitionBy() creates a single partition containing all data,
+        which defeats the purpose of distributed processing and causes OOM on large datasets.</p>
+        <pre>
+# Instead of:
+window = Window.orderBy("timestamp")
+
+# Use:
+window = Window.partitionBy("user_id").orderBy("timestamp")
+        </pre>
+        </body>
+        </html>
+    """.trimIndent()
+
     override fun buildVisitor(holder: ProblemsHolder, isOnTheFly: Boolean): PsiElementVisitor =
         object : PyElementVisitor() {
             override fun visitPyCallExpression(node: PyCallExpression) {

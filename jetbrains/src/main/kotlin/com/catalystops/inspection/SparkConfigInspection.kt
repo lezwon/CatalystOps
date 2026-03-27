@@ -12,6 +12,37 @@ import com.jetbrains.python.psi.PyStringLiteralExpression
 
 class SparkConfigInspection : LocalInspectionTool() {
 
+    override fun getStaticDescription(): String = """
+        <html>
+        <body>
+        <p><b>CatalystOps — Spark Configuration Inspection</b></p>
+        <p>Detects Spark configuration settings that degrade performance or cause correctness issues.</p>
+
+        <h3>CODE_AQE_001 — AQE explicitly disabled</h3>
+        <p>Adaptive Query Execution (AQE) dynamically optimises query plans at runtime (auto-tunes shuffle
+        partitions, handles skew, etc.). It should remain enabled.</p>
+        <pre>
+# Instead of:
+spark.conf.set("spark.sql.adaptive.enabled", "false")
+
+# Remove this line or enable AQE:
+spark.conf.set("spark.sql.adaptive.enabled", "true")
+        </pre>
+
+        <h3>CODE_PARTITION_OVERWRITE_001 — Static partition overwrite</h3>
+        <p>Static partition overwrite mode replaces ALL partitions, even those not written to. Set to
+        dynamic to overwrite only the affected partitions.</p>
+        <pre>
+spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+        </pre>
+
+        <h3>CODE_SHUFFLE_PARTITIONS_001 — Manual shuffle partition count</h3>
+        <p>With AQE enabled, Spark auto-tunes shuffle partition count. Manually setting it may override
+        AQE's optimisation. Verify AQE is enabled before tuning this.</p>
+        </body>
+        </html>
+    """.trimIndent()
+
     override fun buildVisitor(holder: ProblemsHolder, isOnTheFly: Boolean): PsiElementVisitor =
         object : PyElementVisitor() {
             override fun visitPyCallExpression(node: PyCallExpression) {

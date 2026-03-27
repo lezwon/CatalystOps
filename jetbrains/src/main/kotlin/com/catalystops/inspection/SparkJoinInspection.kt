@@ -13,6 +13,47 @@ import com.jetbrains.python.psi.PyStringLiteralExpression
 
 class SparkJoinInspection : LocalInspectionTool() {
 
+    override fun getStaticDescription(): String = """
+        <html>
+        <body>
+        <p><b>CatalystOps — PySpark Join Inspection</b></p>
+        <p>Detects inefficient or dangerous join patterns that cause Cartesian products, positional mismatches,
+        or missed broadcast opportunities.</p>
+
+        <h3>CODE_CROSSJOIN_001 — crossJoin() Cartesian product</h3>
+        <p>crossJoin() produces a Cartesian product (N × M rows). Supply explicit join keys instead.</p>
+        <pre>
+# Instead of:
+df1.crossJoin(df2)
+
+# Use:
+df1.join(df2, "key_column")
+        </pre>
+
+        <h3>CODE_JOIN_001 — join() without arguments</h3>
+        <p>join() called without arguments accidentally creates a cross join. Specify join keys and type.</p>
+        <pre>
+# Instead of:
+df1.join(df2)
+
+# Use:
+df1.join(df2, df1.id == df2.id, "inner")
+        </pre>
+
+        <h3>CODE_UNION_001 — union() positional merge</h3>
+        <p>union() merges by column position. Use unionByName() to merge by column name and avoid
+        silent mismatches when column order differs between DataFrames.</p>
+        <pre>
+# Instead of:
+df1.union(df2)
+
+# Use:
+df1.unionByName(df2)
+        </pre>
+        </body>
+        </html>
+    """.trimIndent()
+
     override fun buildVisitor(holder: ProblemsHolder, isOnTheFly: Boolean): PsiElementVisitor =
         object : PyElementVisitor() {
             override fun visitPyCallExpression(node: PyCallExpression) {
@@ -26,7 +67,6 @@ class SparkJoinInspection : LocalInspectionTool() {
                         ReplaceCrossJoinFix()
                     )
                     "join" -> {
-                        // Flag join without any arguments (positional / accidental cross join)
                         val args = node.argumentList?.arguments ?: return
                         if (args.isEmpty()) {
                             holder.registerProblem(
@@ -37,7 +77,6 @@ class SparkJoinInspection : LocalInspectionTool() {
                         }
                     }
                     "union" -> {
-                        // union() is positional (column order matters) — flag to suggest unionByName
                         holder.registerProblem(
                             node,
                             "[CODE_UNION_001] union() merges by column position. Use unionByName() to merge by column name and avoid silent mismatches.",
