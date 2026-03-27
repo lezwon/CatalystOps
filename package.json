@@ -8,7 +8,7 @@
     "type": "git",
     "url": "https://github.com/lezwon/CatalystOps"
   },
-  "homepage": "https://spendops.dev",
+  "homepage": "https://catalystops.dev/",
   "license": "Elastic-2.0",
   "icon": "media/icon.png",
   "engines": {
@@ -187,7 +187,10 @@
           },
           "catalystops.databricks.executionMode": {
             "type": "string",
-            "enum": ["cluster", "serverless"],
+            "enum": [
+              "cluster",
+              "serverless"
+            ],
             "default": "cluster",
             "description": "Execution mode for dry-run analysis. 'cluster' uses an interactive cluster (requires Cluster ID). 'serverless' uses Databricks Serverless Compute (requires Premium tier)."
           },
@@ -314,17 +317,20 @@
         {
           "id": "catalystops.billingTree",
           "name": "Billing",
-          "icon": "media/icon-mono.svg"
+          "icon": "media/icon-mono.svg",
+          "when": "catalystops.databricksConfigured"
         },
         {
           "id": "catalystops.jobsTree",
           "name": "Jobs",
-          "icon": "media/icon-mono.svg"
+          "icon": "media/icon-mono.svg",
+          "when": "catalystops.databricksConfigured"
         },
         {
           "id": "catalystops.clustersTree",
           "name": "Clusters",
-          "icon": "media/icon-mono.svg"
+          "icon": "media/icon-mono.svg",
+          "when": "catalystops.databricksConfigured"
         }
       ]
     },
@@ -522,7 +528,10 @@
     "test": "npm run compile && ./node_modules/.bin/mocha 'out/test/suite/*.test.js' --ui tdd --timeout 10000 --reporter spec",
     "publish:vsce": "npx vsce publish",
     "publish:ovsx": "npx ovsx publish -p $OVSX_TOKEN",
-    "publish:all": "npm run publish:vsce && npm run publish:ovsx"
+    "publish:all": "npm run publish:vsce && npm run publish:ovsx",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:deploy": "npm run docs:build && cp -r docs/.vitepress/dist/. ../catalystops-web/docs/"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.6",
@@ -532,6 +541,7 @@
     "@vscode/vsce": "^3.7.1",
     "esbuild": "^0.19.11",
     "mocha": "^10.2.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitepress": "^1.6.4"
   }
 }

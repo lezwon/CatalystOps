@@ -1,0 +1,131 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* ── Brand: orange to match catalystops.dev ─────────────────────────────────── */
+:root {
+  --vp-c-brand-1: #F97316;
+  --vp-c-brand-2: #EA580C;
+  --vp-c-brand-3: #C2410C;
+  --vp-c-brand-soft: rgba(249, 115, 22, 0.12);
+
+  --vp-font-family-base: 'Inter', system-ui, sans-serif;
+  --vp-font-family-mono: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+/* ── Dark background: #0F1117 surface, #161B27 card ─────────────────────── */
+.dark {
+  --vp-c-bg: #0F1117;
+  --vp-c-bg-soft: #161B27;
+  --vp-c-bg-muted: #161B27;
+  --vp-c-bg-elv: #161B27;
+
+  --vp-c-border: #1E2535;
+  --vp-c-divider: #1E2535;
+  --vp-c-gutter: #1E2535;
+
+  --vp-c-text-1: #F1F5F9;
+  --vp-c-text-2: #94A3B8;
+  --vp-c-text-3: #6B7280;
+
+  /* Nav */
+  --vp-nav-bg-color: rgba(15, 17, 23, 0.85);
+  --vp-nav-screen-bg-color: #0F1117;
+
+  /* Sidebar */
+  --vp-sidebar-bg-color: #0F1117;
+
+  /* Code blocks */
+  --vp-code-block-bg: #161B27;
+  --vp-code-bg: #161B27;
+  --vp-code-color: #F97316;
+
+  /* Custom block (tip/warning/etc) */
+  --vp-custom-block-tip-border: #F97316;
+  --vp-custom-block-tip-bg: rgba(249, 115, 22, 0.08);
+}
+
+/* ── Nav border matches site ─────────────────────────────────────────────── */
+/* backdrop-filter must NOT be on .VPNav itself — it creates a stacking context
+   that breaks pointer events on the hamburger button. Apply it to the inner bar. */
+.VPNav {
+  border-bottom: 1px solid #1E2535 !important;
+}
+
+.VPNavBar {
+  backdrop-filter: blur(12px);
+}
+
+/* ── Hamburger button ────────────────────────────────────────────────────── */
+.VPNavBarHamburger {
+  position: relative;
+  z-index: 100;
+  pointer-events: auto !important;
+}
+
+/* ── Mobile nav screen ───────────────────────────────────────────────────── */
+.VPNavScreen {
+  background: #0F1117 !important;
+  border-bottom: 1px solid #1E2535;
+  z-index: 99;
+}
+
+.dark .VPNavScreenMenuLink,
+.dark .VPNavScreenMenuGroupLink {
+  color: #F1F5F9 !important;
+}
+
+.dark .VPNavScreenMenuGroupLink:hover,
+.dark .VPNavScreenMenuLink:hover {
+  color: #F97316 !important;
+}
+
+/* ── Sidebar active link: orange ─────────────────────────────────────────── */
+.dark .VPSidebarItem.is-active > .item > .VPLink,
+.dark .VPSidebarItem.is-active > .item .link {
+  color: #F97316 !important;
+}
+
+/* ── Table styles ────────────────────────────────────────────────────────── */
+.dark .vp-doc table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.dark .vp-doc table th {
+  background: #161B27;
+  border: 1px solid #1E2535;
+  color: #F1F5F9;
+}
+
+.dark .vp-doc table td {
+  border: 1px solid #1E2535;
+}
+
+.dark .vp-doc table tr:nth-child(even) td {
+  background: rgba(22, 27, 39, 0.5);
+}
+
+/* ── Inline code: orange tint ────────────────────────────────────────────── */
+.dark .vp-doc code:not(pre code) {
+  color: #F97316;
+  background: #161B27;
+  border: 1px solid #1E2535;
+}
+
+/* ── Heading anchor color ────────────────────────────────────────────────── */
+.dark .vp-doc h1,
+.dark .vp-doc h2,
+.dark .vp-doc h3 {
+  color: #F1F5F9;
+}
+
+/* ── Footer ──────────────────────────────────────────────────────────────── */
+.dark .VPFooter {
+  background: #0F1117;
+  border-top: 1px solid #1E2535;
+}
+
+/* ── Local search modal ──────────────────────────────────────────────────── */
+.dark .VPLocalSearchBox .shell {
+  background: #161B27;
+  border: 1px solid #1E2535;
+}

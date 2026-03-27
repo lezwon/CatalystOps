@@ -19,6 +19,7 @@ import { logDebug, logError } from '../logger';
 import { Severity } from '../models/types';
 import { getConnectionConfig } from '../config/settings';
 import { listJobs, getLastRun, getRunDetails, getClusterEventLogPath } from '../databricks/jobsApi';
+import { listClusters } from '../databricks/clustersApi';
 import { fetchPlansFromEventLog } from '../databricks/eventLogParser';
 import { parsePlan } from '../analysis/planParser';
 
@@ -404,6 +405,45 @@ function createMcpServer(context: vscode.ExtensionContext): McpServer {
                 return {
                     isError: true,
                     content: [{ type: 'text' as const, text: `Dry run failed: ${err instanceof Error ? err.message : String(err)}` }],
+                };
+            }
+        },
+    );
+
+    // ── Tool: list_clusters ───────────────────────────────────────────────────
+
+    server.tool(
+        'list_clusters',
+        'Lists interactive Databricks clusters in the workspace with their current state (RUNNING, TERMINATED, PENDING, etc.), Spark version, and access mode. Useful for checking which clusters are available for dry runs or SSH connections.',
+        async () => {
+            const config = getConnectionConfig();
+            if (!config) {
+                return {
+                    content: [{ type: 'text' as const, text: 'Databricks not configured. Run "CatalystOps: Configure Connection" in VS Code first.' }],
+                };
+            }
+            try {
+                const clusters = await listClusters(config.host, config.token);
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            clusterCount: clusters.length,
+                            clusters: clusters.map(c => ({
+                                clusterId: c.clusterId,
+                                name: c.clusterName,
+                                state: c.state,
+                                sparkVersion: c.sparkVersion,
+                                numWorkers: c.numWorkers ?? null,
+                                singleUserName: c.singleUserName ?? null,
+                            })),
+                        }, null, 2),
+                    }],
+                };
+            } catch (err) {
+                return {
+                    isError: true,
+                    content: [{ type: 'text' as const, text: `Failed to list clusters: ${err instanceof Error ? err.message : String(err)}` }],
                 };
             }
         },

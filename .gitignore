@@ -60,3 +60,4 @@ target/
 *.swo
 *~
 .DS_Store
+jetbrains/.gradle/

@@ -109,6 +109,7 @@ export async function analyzeJobRun(
                     logDebug(`analyzeJobRun: found ${planCount} plan entries`);
 
                     if (planCount > 0) {
+                        logDebug(`analyzeJobRun: ${planCount} plan(s) found, running analysis`);
                         for (const entry of planEntries) {
                             planIssues.push(...parsePlan(entry.physicalPlan));
                         }
@@ -126,22 +127,31 @@ export async function analyzeJobRun(
                         // the DAG should highlight only plan-exclusive findings.
                         planIssues = planIssues.filter(pi => !LOCAL_ANALYSIS_COVERED.has(pi.name));
                     } else {
-                        vscode.window.showWarningMessage(
-                            `CatalystOps: No SQL execution plans found in event log for "${jobName}". ` +
-                            'The job may not have used Spark SQL/DataFrames, or event logging may not be enabled on this cluster.',
+                        void vscode.window.showWarningMessage(
+                            `CatalystOps: No SQL execution plans found in the event log for "${jobName}". ` +
+                            'The job may not have executed any Spark SQL or DataFrame operations, or the event log may be empty.',
                         );
                     }
                 } else {
-                    vscode.window.showWarningMessage(
-                        `CatalystOps: Cluster event logging not configured for "${jobName}". ` +
-                        'Enable DBFS event logging on the cluster to get plan analysis.',
-                    );
+                    void vscode.window.showErrorMessage(
+                        `CatalystOps: No event log found for "${jobName}".`,
+                        'How to enable',
+                    ).then(action => {
+                        if (action === 'How to enable') {
+                            void vscode.window.showInformationMessage(
+                                'To enable event logs: open your cluster in Databricks → Advanced Options → Logging → ' +
+                                'set Destination to DBFS and a Log Path (e.g. dbfs:/cluster-logs). ' +
+                                'Then restart the cluster and re-run the job.',
+                            );
+                        }
+                    });
                 }
             } else {
                 planIssues = [];
-                vscode.window.showWarningMessage(
-                    `CatalystOps: Serverless run detected for "${jobName}". ` +
-                    'Event log-based plan analysis is not available. Use the Dry Run command on the source file instead.',
+                void vscode.window.showErrorMessage(
+                    `CatalystOps: "${jobName}" ran on serverless compute. ` +
+                    'Serverless jobs do not write Spark event logs to DBFS, so historical plan analysis is not available. ' +
+                    'Use the Dry Run command on the source file for plan analysis.',
                 );
             }
 

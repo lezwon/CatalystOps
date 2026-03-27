@@ -34,6 +34,7 @@ import { startMcpServer, stopMcpServer } from './mcp/server';
 import { updateMcpSnapshot } from './mcp/mcpState';
 import { onCacheUpdated, getCachedResults, getCachedPlanIssues, getDataFrameLineMap } from './analysis/analysisCache';
 import { buildPlanTrees } from './analysis/planTreeBuilder';
+import { getConnectionConfig } from './config/settings';
 
 export function activate(context: vscode.ExtensionContext): void {
     initOutputChannel(context);
@@ -77,6 +78,13 @@ export function activate(context: vscode.ExtensionContext): void {
             }),
         );
 
+        // Set VS Code context for Databricks-dependent views
+        function setDatabricksContext(): void {
+            const configured = !!getConnectionConfig();
+            void vscode.commands.executeCommand('setContext', 'catalystops.databricksConfigured', configured);
+        }
+        setDatabricksContext();
+
         // Billing tree view
         const billingTreeProvider = new BillingTreeDataProvider();
         vscode.window.registerTreeDataProvider('catalystops.billingTree', billingTreeProvider);
@@ -85,8 +93,10 @@ export function activate(context: vscode.ExtensionContext): void {
         const jobsTreeProvider = new JobsTreeDataProvider();
         const jobsTreeView = vscode.window.createTreeView('catalystops.jobsTree', { treeDataProvider: jobsTreeProvider });
         context.subscriptions.push(jobsTreeView);
-        if (vscode.workspace.getConfiguration('catalystops').get<boolean>('jobs.enabled', true)) {
+        if (getConnectionConfig() && vscode.workspace.getConfiguration('catalystops').get<boolean>('jobs.enabled', true)) {
             void refreshJobsList(jobsTreeProvider);
+        } else if (!getConnectionConfig()) {
+            // Panels will be hidden via when clause; nothing to do
         } else {
             jobsTreeProvider.setError('Jobs panel disabled. Enable "catalystops.jobs.enabled" in settings.');
         }
@@ -100,7 +110,9 @@ export function activate(context: vscode.ExtensionContext): void {
         // Clusters tree view
         const clustersTreeProvider = new ClustersTreeDataProvider();
         vscode.window.registerTreeDataProvider('catalystops.clustersTree', clustersTreeProvider);
-        void refreshClustersList(clustersTreeProvider);
+        if (getConnectionConfig()) {
+            void refreshClustersList(clustersTreeProvider);
+        }
 
         // Register commands
         context.subscriptions.push(
@@ -109,7 +121,7 @@ export function activate(context: vscode.ExtensionContext): void {
             vscode.commands.registerCommand('catalystops.analyzeCost', () => { trackWalkthroughStep('dry-run'); return analyzeCost(context, issuesTreeProvider); }),
             vscode.commands.registerCommand('catalystops.analyzeSelection', () => analyzeSelection(context, issuesTreeProvider)),
             vscode.commands.registerCommand('catalystops.showReport', () => showReport(context)),
-            vscode.commands.registerCommand('catalystops.configureConnection', () => { trackWalkthroughStep('connect'); return configureConnection(); }),
+            vscode.commands.registerCommand('catalystops.configureConnection', async () => { trackWalkthroughStep('connect'); await configureConnection(); setDatabricksContext(); }),
             vscode.commands.registerCommand('catalystops.showGeneratedScript', () => showGeneratedScript()),
             vscode.commands.registerCommand('catalystops.previewDryRunScript', () => previewDryRunScript()),
             vscode.commands.registerCommand('catalystops.previewFullDryRunScript', () => previewFullDryRunScript()),
@@ -279,6 +291,16 @@ export function activate(context: vscode.ExtensionContext): void {
             }),
 
             { dispose: () => { disposeDagWebview(); } },
+        );
+
+        // Re-evaluate Databricks context when relevant settings change
+        context.subscriptions.push(
+            vscode.workspace.onDidChangeConfiguration(e => {
+                if (e.affectsConfiguration('catalystops.databricks') ||
+                    e.affectsConfiguration('catalystops.connection')) {
+                    setDatabricksContext();
+                }
+            }),
         );
 
         const config = vscode.workspace.getConfiguration('catalystops');
