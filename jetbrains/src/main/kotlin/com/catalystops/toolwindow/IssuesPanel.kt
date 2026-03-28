@@ -1,5 +1,6 @@
 package com.catalystops.toolwindow
 
+import com.catalystops.analysis.PlanIssue
 import com.catalystops.inspection.SparkActionInspection
 import com.catalystops.inspection.SparkCachingInspection
 import com.catalystops.inspection.SparkConfigInspection
@@ -25,6 +26,8 @@ import com.intellij.openapi.fileEditor.FileEditorManagerListener
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiManager
+import com.intellij.ui.TitledSeparator
+import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBPanel
 import com.intellij.ui.components.JBScrollPane
@@ -32,7 +35,10 @@ import com.intellij.util.OpenSourceUtil
 import com.intellij.util.ui.JBUI
 import com.jetbrains.python.psi.PyFile
 import java.awt.BorderLayout
+import java.awt.Dimension
+import javax.swing.BoxLayout
 import javax.swing.DefaultListModel
+import javax.swing.JPanel
 import javax.swing.ListSelectionModel
 
 private val INSPECTION_TOOLS: List<LocalInspectionTool> = listOf(
@@ -52,20 +58,50 @@ private val INSPECTION_TOOLS: List<LocalInspectionTool> = listOf(
 
 class IssuesPanel(private val project: Project) : JBPanel<IssuesPanel>(BorderLayout()) {
 
-    private val model = DefaultListModel<ProblemDescriptor>()
-    private val list = JBList(model).apply {
+    // ── Code issues (local static analysis) ──────────────────────────────────
+
+    private val codeModel = DefaultListModel<ProblemDescriptor>()
+    private val codeList = JBList(codeModel).apply {
         selectionMode = ListSelectionModel.SINGLE_SELECTION
         cellRenderer = IssueCellRenderer()
     }
 
+    // ── Plan issues (from dry run) ────────────────────────────────────────────
+
+    private val planModel = DefaultListModel<PlanIssue>()
+    private val planList = JBList(planModel).apply {
+        selectionMode = ListSelectionModel.SINGLE_SELECTION
+        cellRenderer = PlanIssueCellRenderer()
+    }
+
+    private val planSection: JPanel
+
     init {
         border = JBUI.Borders.empty(4)
-        add(JBScrollPane(list), BorderLayout.CENTER)
 
-        // Navigate to source on selection
-        list.addListSelectionListener { e ->
+        // Build plan issues section (initially hidden)
+        planSection = JPanel(BorderLayout()).apply {
+            isVisible = false
+            add(TitledSeparator("Plan Issues (from dry run)"), BorderLayout.NORTH)
+            add(JBScrollPane(planList).apply {
+                preferredSize = Dimension(0, 160)
+            }, BorderLayout.CENTER)
+        }
+
+        // Build content panel with both sections
+        val contentPanel = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            add(TitledSeparator("Code Issues"))
+            add(JBScrollPane(codeList))
+            add(planSection)
+        }
+
+        add(contentPanel, BorderLayout.CENTER)
+
+        // Navigate to source on code issue selection
+        codeList.addListSelectionListener { e ->
             if (e.valueIsAdjusting) return@addListSelectionListener
-            val descriptor = list.selectedValue ?: return@addListSelectionListener
+            val descriptor = codeList.selectedValue ?: return@addListSelectionListener
             val element = descriptor.psiElement ?: return@addListSelectionListener
             val file = element.containingFile?.virtualFile ?: return@addListSelectionListener
             val offset = element.textOffset
@@ -93,9 +129,20 @@ class IssuesPanel(private val project: Project) : JBPanel<IssuesPanel>(BorderLay
         FileEditorManager.getInstance(project).selectedFiles.firstOrNull()?.let { refresh(it) }
     }
 
+    /** Called by RunDryRunAction after a dry run completes. */
+    fun updatePlanIssues(issues: List<PlanIssue>) {
+        ApplicationManager.getApplication().invokeLater {
+            planModel.clear()
+            issues.forEach { planModel.addElement(it) }
+            planSection.isVisible = issues.isNotEmpty()
+            revalidate()
+            repaint()
+        }
+    }
+
     private fun refresh(virtualFile: VirtualFile) {
         if (virtualFile.extension != "py") {
-            ApplicationManager.getApplication().invokeLater { model.clear() }
+            ApplicationManager.getApplication().invokeLater { codeModel.clear() }
             return
         }
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -141,8 +188,8 @@ class IssuesPanel(private val project: Project) : JBPanel<IssuesPanel>(BorderLay
             }
 
             ApplicationManager.getApplication().invokeLater {
-                model.clear()
-                allProblems.forEach { model.addElement(it) }
+                codeModel.clear()
+                allProblems.forEach { codeModel.addElement(it) }
             }
         }
     }

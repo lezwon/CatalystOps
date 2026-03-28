@@ -94,5 +94,27 @@
     <lang.documentationProvider language="Python"
       implementationClass="com.catalystops.documentation.CatalystOpsDocumentationProvider"
       order="first"/>
+
+    <!-- Databricks settings -->
+    <projectService serviceImplementation="com.catalystops.settings.DatabricksSettings"/>
+
+    <projectConfigurable
+      instance="com.catalystops.settings.DatabricksSettingsConfigurable"
+      displayName="CatalystOps"
+      groupId="tools"/>
+
+    <!-- Notification group for dry run and job analysis messages -->
+    <notificationGroup id="CatalystOps" displayType="BALLOON" isLogByDefault="true"/>
   </extensions>
+
+  <actions>
+    <action id="com.catalystops.actions.RunDryRunAction"
+            class="com.catalystops.actions.RunDryRunAction"
+            text="CatalystOps: Run Dry Run"
+            description="Run a neutralized dry run of the current PySpark file on Databricks and analyze the query plan.">
+      <keyboard-shortcut keymap="$default" first-keystroke="shift ctrl K"/>
+      <keyboard-shortcut keymap="Mac OS X" first-keystroke="shift meta K"/>
+      <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="shift meta K"/>
+    </action>
+  </actions>
 </idea-plugin>

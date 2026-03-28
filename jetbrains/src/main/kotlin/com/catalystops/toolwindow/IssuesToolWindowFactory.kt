@@ -10,8 +10,13 @@ class IssuesToolWindowFactory : ToolWindowFactory {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         TelemetryService.track("toolwindow.opened")
-        val panel = IssuesPanel(project)
-        val content = ContentFactory.getInstance().createContent(panel, "Issues", false)
-        toolWindow.contentManager.addContent(content)
+
+        val issuesPanel = IssuesPanel(project)
+        val issuesContent = ContentFactory.getInstance().createContent(issuesPanel, "Issues", false)
+        toolWindow.contentManager.addContent(issuesContent)
+
+        val jobsPanel = JobsPanel(project, issuesPanel)
+        val jobsContent = ContentFactory.getInstance().createContent(jobsPanel, "Jobs", false)
+        toolWindow.contentManager.addContent(jobsContent)
     }
 }
