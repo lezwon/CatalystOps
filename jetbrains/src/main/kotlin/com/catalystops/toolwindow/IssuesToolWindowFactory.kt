@@ -18,5 +18,13 @@ class IssuesToolWindowFactory : ToolWindowFactory {
         val jobsPanel = JobsPanel(project, issuesPanel)
         val jobsContent = ContentFactory.getInstance().createContent(jobsPanel, "Jobs", false)
         toolWindow.contentManager.addContent(jobsContent)
+
+        val clustersPanel = ClustersPanel(project)
+        val clustersContent = ContentFactory.getInstance().createContent(clustersPanel, "Clusters", false)
+        toolWindow.contentManager.addContent(clustersContent)
+
+        val billingPanel = BillingPanel(project)
+        val billingContent = ContentFactory.getInstance().createContent(billingPanel, "Billing", false)
+        toolWindow.contentManager.addContent(billingContent)
     }
 }

@@ -103,6 +103,10 @@
       displayName="CatalystOps"
       groupId="tools"/>
 
+    <!-- Inlay hints: static cost estimation from @compute annotations -->
+    <codeInsight.inlayProvider language="Python"
+      implementationClass="com.catalystops.providers.CostInlayHintProvider"/>
+
     <!-- Notification group for dry run and job analysis messages -->
     <notificationGroup id="CatalystOps" displayType="BALLOON" isLogByDefault="true"/>
   </extensions>
