@@ -11,6 +11,7 @@
  */
 
 import * as vscode from 'vscode';
+import { sendEvent } from '../telemetry';
 import { listProfiles, DatabricksProfile } from '../config/databricksConfig';
 import {
     checkAzureCliLogin,
@@ -147,6 +148,7 @@ async function azureCliFlow(
         profile: '',
     });
 
+    sendEvent('connection/configured', { authType: 'azure-cli' });
     vscode.window.showInformationMessage(
         `CatalystOps: Connected to "${workspacePick.label}" via Azure CLI`,
     );
@@ -173,6 +175,7 @@ async function gcpAdcFlow(
         profile: '',
     });
 
+    sendEvent('connection/configured', { authType: 'gcp-adc' });
     vscode.window.showInformationMessage(
         `CatalystOps: Connected to "${host}" via GCP ADC`,
     );
@@ -206,6 +209,7 @@ async function databricksCfgFlow(
         profile: profile.name,
     });
 
+    sendEvent('connection/configured', { authType: 'databricks-cfg' });
     vscode.window.showInformationMessage(
         `CatalystOps: Connected using profile "${profile.name}" (${profile.host})`,
     );
@@ -239,6 +243,7 @@ async function manualPatFlow(
         profile: '',
     });
 
+    sendEvent('connection/configured', { authType: 'pat' });
     vscode.window.showInformationMessage('CatalystOps: Databricks connection configured.');
 }
 

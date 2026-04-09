@@ -2,7 +2,7 @@
  * CatalystOps MCP Server
  *
  * Exposes CatalystOps analysis data as MCP tools, resources, and prompts.
- * Transport: Streamable HTTP on 127.0.0.1 (OS-assigned port).
+ * Transport: Streamable HTTP on 127.0.0.1 (configurable static port, default 49152).
  */
 
 import * as http from 'http';
@@ -989,8 +989,9 @@ export async function startMcpServer(context: vscode.ExtensionContext): Promise<
         res.end();
     });
 
+    const port = vscode.workspace.getConfiguration('catalystops').get<number>('mcp.port', 49152);
     return new Promise((resolve, reject) => {
-        _httpServer!.listen(0, '127.0.0.1', () => {
+        _httpServer!.listen(port, '127.0.0.1', () => {
             const addr = _httpServer!.address() as { port: number } | null;
             if (!addr) { reject(new Error('Failed to get server address')); return; }
             logDebug(`MCP server listening on http://127.0.0.1:${addr.port}/mcp`);
@@ -1004,7 +1005,7 @@ export async function startMcpServer(context: vscode.ExtensionContext): Promise<
 /**
  * Write (or update) .vscode/mcp.json so GitHub Copilot Chat can discover
  * the CatalystOps MCP server without needing registerMcpServerDefinitionProvider.
- * The file is rewritten on every extension start because the port is dynamic.
+ * The file is rewritten on every extension start to reflect the configured port.
  */
 async function writeMcpJson(port: number): Promise<void> {
     const folders = vscode.workspace.workspaceFolders;

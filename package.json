@@ -2,7 +2,7 @@
   "name": "catalystops",
   "displayName": "CatalystOps - PySpark Optimizer",
   "description": "Analyze PySpark code for performance issues using Catalyst execution plan analysis",
-  "version": "0.9.2",
+  "version": "0.10.0",
   "publisher": "CatalystOps",
   "repository": {
     "type": "git",
@@ -26,6 +26,7 @@
     "catalyst"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onLanguage:python",
     "onView:catalystops.issuesTree",
     "onView:catalystops.billingTree",
@@ -167,7 +168,11 @@
           },
           "catalystops.databricks.authType": {
             "type": "string",
-            "enum": ["pat", "azure-cli", "gcp-adc"],
+            "enum": [
+              "pat",
+              "azure-cli",
+              "gcp-adc"
+            ],
             "enumDescriptions": [
               "Personal Access Token — use a PAT from the token field or ~/.databrickscfg",
               "Azure CLI — authenticate using your active `az login` session; no token required",
@@ -303,6 +308,13 @@
             "type": "boolean",
             "default": false,
             "description": "Enable debug logging — prints curl-equivalent commands for every Databricks API call to the Output panel."
+          },
+          "catalystops.mcp.port": {
+            "type": "number",
+            "default": 49152,
+            "minimum": 1024,
+            "maximum": 65535,
+            "description": "Port for the CatalystOps MCP server. Change if the default conflicts with another service. Restart VS Code after changing."
           }
         }
       }

@@ -10,7 +10,7 @@
 
 ---
 
-![CatalystOps Demo](https://iili.io/qFE28FV.gif)
+![CatalystOps Demo](https://iili.io/B0V4Zpp.gif)
 
 ---
 
