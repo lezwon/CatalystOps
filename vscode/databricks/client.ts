@@ -6,6 +6,7 @@
 import * as https from 'https';
 import * as url from 'url';
 import { logDebug } from '../logger';
+import { isAzureHost, getAzureCliToken, clearAzureTokenCache, AzureCliAuthError } from './azureCliAuth';
 
 export interface RequestOptions {
     host: string;
@@ -59,12 +60,28 @@ function toCurl(options: RequestOptions, bodyStr: string | undefined): string {
 
 /**
  * Make an authenticated request to the Databricks REST API.
+ * If token is empty and the host is an Azure workspace, fetches a token via Azure CLI automatically.
  */
-export function apiRequest<T = unknown>(options: RequestOptions): Promise<ApiResponse<T>> {
+export async function apiRequest<T = unknown>(options: RequestOptions): Promise<ApiResponse<T>> {
+    let token = options.token;
+
+    if (!token && isAzureHost(options.host)) {
+        try {
+            token = await getAzureCliToken();
+        } catch (err) {
+            throw new AzureCliAuthError(err instanceof Error ? err.message : String(err));
+        }
+    }
+
+    return makeRequest<T>({ ...options, token });
+}
+
+function makeRequest<T = unknown>(options: RequestOptions): Promise<ApiResponse<T>> {
     return new Promise((resolve, reject) => {
         const parsed = new URL(options.path, options.host);
         const bodyStr = options.body ? JSON.stringify(options.body) : undefined;
         const rawBody = options.rawBody;
+        const token = options.token;
 
         logDebug(toCurl(options, bodyStr));
 
@@ -79,7 +96,7 @@ export function apiRequest<T = unknown>(options: RequestOptions): Promise<ApiRes
             path: parsed.pathname + parsed.search,
             method: options.method,
             headers: {
-                'Authorization': `Bearer ${options.token}`,
+                'Authorization': `Bearer ${token}`,
                 'Content-Type': contentType,
                 'User-Agent': 'CatalystOps-VSCode/0.1.0',
             },
@@ -96,6 +113,8 @@ export function apiRequest<T = unknown>(options: RequestOptions): Promise<ApiRes
             res.on('data', (chunk: Buffer) => chunks.push(chunk));
             res.on('end', () => {
                 const raw = Buffer.concat(chunks).toString('utf-8');
+                // Clear Azure token cache on 401 so the next call re-fetches from az CLI
+                if (res.statusCode === 401) { clearAzureTokenCache(); }
                 try {
                     const data = raw ? JSON.parse(raw) : {};
                     resolve({ statusCode: res.statusCode ?? 0, data: data as T });

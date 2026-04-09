@@ -20,6 +20,7 @@ import { showJobRunDagWebview } from '../views/dagWebview';
 import { updateMcpJobRunSnapshot } from '../mcp/mcpState';
 import { logDebug, logError } from '../logger';
 import { sendEvent } from '../telemetry';
+import { AzureCliAuthError, checkAzureCliLogin } from '../databricks/azureCliAuth';
 
 /**
  * Plan issue names that are already surfaced by local static code analysis.
@@ -46,6 +47,18 @@ export async function refreshJobsList(
     jobsTreeProvider.setLoading(true);
     sendEvent('jobs/refresh_start');
 
+    if (config.authType === 'azure-cli') {
+        try {
+            await checkAzureCliLogin();
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            jobsTreeProvider.setError(message);
+            sendEvent('jobs/refresh_failed', { error: message.substring(0, 200) });
+            notifyAzureCliLogin();
+            return;
+        }
+    }
+
     try {
         const jobs = await listJobs(config.host, config.token);
 
@@ -67,6 +80,9 @@ export async function refreshJobsList(
         const message = err instanceof Error ? err.message : String(err);
         jobsTreeProvider.setError(message);
         sendEvent('jobs/refresh_failed', { error: message.substring(0, 200) });
+        if (err instanceof AzureCliAuthError) {
+            notifyAzureCliLogin();
+        }
     }
 }
 
@@ -209,6 +225,20 @@ export async function analyzeJobRun(
             logError(`analyzeJobRun failed: ${message}`);
             sendEvent('job_run/failed', { jobName, error: message.substring(0, 200) });
             vscode.window.showErrorMessage(`CatalystOps: ${message}`);
+        }
+    });
+}
+
+/** Show a notification prompting the user to run `az login`. */
+function notifyAzureCliLogin(): void {
+    void vscode.window.showErrorMessage(
+        'CatalystOps: Azure CLI session expired or not logged in.',
+        'Open Terminal',
+    ).then(action => {
+        if (action === 'Open Terminal') {
+            void vscode.commands.executeCommand('workbench.action.terminal.new').then(() => {
+                void vscode.commands.executeCommand('workbench.action.terminal.sendSequence', { text: 'az login\n' });
+            });
         }
     });
 }

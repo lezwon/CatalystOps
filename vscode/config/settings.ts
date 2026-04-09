@@ -4,10 +4,12 @@
 
 import * as vscode from 'vscode';
 import { readDatabricksConfig } from './databricksConfig';
+import { isAzureHost } from '../databricks/azureCliAuth';
 
 export interface DatabricksConnectionConfig {
     host: string;
     token: string;
+    authType: 'pat' | 'azure-cli';
     clusterId?: string;
     executionMode: 'cluster' | 'serverless' | 'ssh';
     sshConnectionName?: string;
@@ -35,10 +37,14 @@ export function getConnectionConfig(): DatabricksConnectionConfig | undefined {
     const configPath = config.get<string>('databricks.configPath', '~/.databrickscfg');
     const profile = config.get<string>('databricks.profile', 'DEFAULT');
 
+    // Read explicit authType setting before file config so we know whether to use a file token
+    const configuredAuthType = config.get<string>('databricks.authType', 'pat');
+
     const fileConfig = readDatabricksConfig(configPath, profile);
     if (fileConfig) {
         if (!host) { host = fileConfig.host; }
-        if (!token) { token = fileConfig.token; }
+        // Don't pull a PAT from .databrickscfg when azure-cli auth is explicitly configured
+        if (!token && configuredAuthType !== 'azure-cli') { token = fileConfig.token; }
         if (!clusterId && fileConfig.clusterId) { clusterId = fileConfig.clusterId; }
     }
 
@@ -47,9 +53,21 @@ export function getConnectionConfig(): DatabricksConnectionConfig | undefined {
         executionMode = 'serverless';
     }
 
+    // Normalize host URL early so isAzureHost() check works
+    host = host.replace(/\/+$/, '');
+    if (host && !host.startsWith('https://')) {
+        host = 'https://' + host;
+    }
+
+    // Determine auth type: explicit setting takes priority; auto-detect for Azure hosts with no token
+    const authType: 'pat' | 'azure-cli' =
+        configuredAuthType === 'azure-cli'
+            ? 'azure-cli'
+            : (!token && isAzureHost(host)) ? 'azure-cli' : 'pat';
+
     const missing: string[] = [];
     if (!host) { missing.push('host'); }
-    if (!token) { missing.push('token'); }
+    if (!token && authType !== 'azure-cli') { missing.push('token'); }
 
     if (missing.length > 0) {
         const src = fileConfig ? `profile "${profile}" in ${configPath}` : `${configPath} (file not found or profile "${profile}" missing)`;
@@ -59,15 +77,10 @@ export function getConnectionConfig(): DatabricksConnectionConfig | undefined {
         return undefined;
     }
 
-    // Normalize host URL
-    host = host.replace(/\/+$/, '');
-    if (!host.startsWith('https://')) {
-        host = 'https://' + host;
-    }
-
     return {
         host,
         token,
+        authType,
         clusterId: clusterId || undefined,
         executionMode,
         sshConnectionName: executionMode === 'ssh' ? sshConnectionName : undefined,

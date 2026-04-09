@@ -165,10 +165,20 @@
             "default": "",
             "description": "Databricks workspace URL (e.g., https://myworkspace.cloud.databricks.com)"
           },
+          "catalystops.databricks.authType": {
+            "type": "string",
+            "enum": ["pat", "azure-cli"],
+            "enumDescriptions": [
+              "Personal Access Token — use a PAT from the token field or ~/.databrickscfg",
+              "Azure CLI — authenticate using your active `az login` session; no token required"
+            ],
+            "default": "pat",
+            "description": "Authentication method. Use 'Configure Databricks Connection' command to set this automatically."
+          },
           "catalystops.databricks.token": {
             "type": "string",
             "default": "",
-            "description": "Databricks personal access token"
+            "description": "Databricks personal access token (only used when authType is 'pat' and no profile is set)"
           },
           "catalystops.databricks.profile": {
             "type": "string",

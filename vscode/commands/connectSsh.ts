@@ -22,6 +22,7 @@ import { listClusters, startCluster, stopCluster, getClusterState, getClusterSpe
 import { ClustersTreeDataProvider } from '../views/clustersTreeView';
 import { logDebug, logError } from '../logger';
 import { sendEvent } from '../telemetry';
+import { AzureCliAuthError, checkAzureCliLogin } from '../databricks/azureCliAuth';
 
 // Minimum Databricks CLI version required for SSH setup
 const MIN_CLI_MAJOR = 0;
@@ -259,6 +260,27 @@ export async function refreshClustersList(provider: ClustersTreeDataProvider): P
     provider.setLoading(true);
     sendEvent('clusters/refresh_start');
 
+    if (config.authType === 'azure-cli') {
+        try {
+            await checkAzureCliLogin();
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            provider.setError(message);
+            sendEvent('clusters/refresh_failed', { error: message.substring(0, 200) });
+            void vscode.window.showErrorMessage(
+                'CatalystOps: Azure CLI session expired or not logged in.',
+                'Open Terminal',
+            ).then(action => {
+                if (action === 'Open Terminal') {
+                    void vscode.commands.executeCommand('workbench.action.terminal.new').then(() => {
+                        void vscode.commands.executeCommand('workbench.action.terminal.sendSequence', { text: 'az login\n' });
+                    });
+                }
+            });
+            return;
+        }
+    }
+
     try {
         const clusters = await listClusters(config.host, config.token);
         provider.setClusters(clusters);
@@ -267,6 +289,18 @@ export async function refreshClustersList(provider: ClustersTreeDataProvider): P
         const message = err instanceof Error ? err.message : String(err);
         provider.setError(message);
         sendEvent('clusters/refresh_failed', { error: message.substring(0, 200) });
+        if (err instanceof AzureCliAuthError) {
+            void vscode.window.showErrorMessage(
+                'CatalystOps: Azure CLI session expired or not logged in.',
+                'Open Terminal',
+            ).then(action => {
+                if (action === 'Open Terminal') {
+                    void vscode.commands.executeCommand('workbench.action.terminal.new').then(() => {
+                        void vscode.commands.executeCommand('workbench.action.terminal.sendSequence', { text: 'az login\n' });
+                    });
+                }
+            });
+        }
     }
 }
 
