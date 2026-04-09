@@ -139,20 +139,16 @@ async function azureCliFlow(
         return;
     }
 
-    const clusterId = await askClusterId(config);
-    if (clusterId === undefined) { return; }
 
     await saveSettings(config, target, {
         host: host!,
         token: '',
         authType: 'azure-cli',
-        clusterId,
         profile: '',
     });
 
-    const modeLabel = clusterId ? `cluster ${clusterId}` : 'serverless';
     vscode.window.showInformationMessage(
-        `CatalystOps: Connected to "${workspacePick.label}" via Azure CLI — ${modeLabel}`,
+        `CatalystOps: Connected to "${workspacePick.label}" via Azure CLI`,
     );
 }
 
@@ -169,20 +165,16 @@ async function gcpAdcFlow(
     });
     if (host === undefined) { return; }
 
-    const clusterId = await askClusterId(config);
-    if (clusterId === undefined) { return; }
 
     await saveSettings(config, target, {
         host,
         token: '',
         authType: 'gcp-adc',
-        clusterId,
         profile: '',
     });
 
-    const modeLabel = clusterId ? `cluster ${clusterId}` : 'serverless';
     vscode.window.showInformationMessage(
-        `CatalystOps: Connected to "${host}" via GCP ADC — ${modeLabel}`,
+        `CatalystOps: Connected to "${host}" via GCP ADC`,
     );
 }
 
@@ -207,27 +199,15 @@ async function databricksCfgFlow(
     const profile = profiles.find(p => p.name === picked.label);
     if (!profile) { return; }
 
-    let clusterId = profile.clusterId || '';
-    if (!clusterId) {
-        const input = await vscode.window.showInputBox({
-            prompt: `No cluster_id in profile "${profile.name}". Enter cluster ID (leave blank to use serverless)`,
-            placeHolder: '1234-567890-abcdef12',
-        });
-        if (input === undefined) { return; }
-        clusterId = input;
-    }
-
     await saveSettings(config, target, {
         host: profile.host,
         token: '',           // token lives in .databrickscfg, not VS Code settings
         authType: 'pat',
-        clusterId,
         profile: profile.name,
     });
 
-    const modeLabel = clusterId ? `cluster ${clusterId}` : 'serverless';
     vscode.window.showInformationMessage(
-        `CatalystOps: Connected using profile "${profile.name}" (${profile.host}) — ${modeLabel}`,
+        `CatalystOps: Connected using profile "${profile.name}" (${profile.host})`,
     );
 }
 
@@ -252,36 +232,22 @@ async function manualPatFlow(
     });
     if (token === undefined) { return; }
 
-    const clusterId = await askClusterId(config);
-    if (clusterId === undefined) { return; }
-
     await saveSettings(config, target, {
         host,
         token,
         authType: 'pat',
-        clusterId,
         profile: '',
     });
 
-    const modeLabel = clusterId ? `cluster ${clusterId}` : 'serverless';
-    vscode.window.showInformationMessage(`CatalystOps: Databricks connection configured — ${modeLabel}.`);
+    vscode.window.showInformationMessage('CatalystOps: Databricks connection configured.');
 }
 
 // ─── Shared helpers ────────────────────────────────────────────────────────────
-
-async function askClusterId(config: vscode.WorkspaceConfiguration): Promise<string | undefined> {
-    return vscode.window.showInputBox({
-        prompt: 'Interactive cluster ID for dry-run analysis (leave blank to use serverless)',
-        placeHolder: '1234-567890-abcdef12',
-        value: config.get<string>('databricks.clusterId', ''),
-    });
-}
 
 interface SettingsToSave {
     host: string;
     token: string;
     authType: 'pat' | 'azure-cli' | 'gcp-adc';
-    clusterId: string;
     profile: string;
 }
 
@@ -294,8 +260,6 @@ async function saveSettings(
         config.update('databricks.host', s.host, target),
         config.update('databricks.token', s.token, target),
         config.update('databricks.authType', s.authType, target),
-        config.update('databricks.clusterId', s.clusterId, target),
         config.update('databricks.profile', s.profile, target),
-        config.update('databricks.executionMode', s.clusterId ? 'cluster' : 'serverless', target),
     ]);
 }
