@@ -10,9 +10,6 @@ All notable changes to CatalystOps are documented here.
 - **Cost inlay hints** — `@compute` annotations in Python files now show estimated cost inline in the editor, visible without opening the billing panel.
 - **MCP server on startup** — the CatalystOps MCP server starts immediately when VS Code opens, with no Python file required. Port is now configurable via `catalystops.mcp.port` (default 49152).
 
-### Changed
-- **Connection setup simplified** — cluster ID is no longer asked during connection configuration. It is only prompted when running a dry-run analysis, keeping the connect flow minimal.
-
 ---
 
 ## [0.9.2]

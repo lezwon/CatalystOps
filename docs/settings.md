@@ -50,6 +50,7 @@ All CatalystOps settings are prefixed with `catalystops.`.
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `catalystops.mcp.enabled` | boolean | `true` | Enable the built-in MCP server |
+| `catalystops.mcp.port` | number | `49152` | Port for the MCP HTTP server. Change if it conflicts with another service. Restart VS Code to apply. |
 
 ## Debug
 

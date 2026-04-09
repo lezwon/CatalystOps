@@ -16,52 +16,32 @@ Local analysis starts immediately — no configuration needed. Open any `.py` fi
 
 Databricks connectivity is required for dry-run plan analysis, job run analysis, the clusters panel, and the billing dashboard. Local analysis always works without it.
 
-Run **CatalystOps: Configure Databricks Connection** from the Command Palette (`⌘⇧P` / `Ctrl+Shift+P`) and follow the prompts, or add settings manually.
+Run **CatalystOps: Configure Databricks Connection** from the Command Palette (`⌘⇧P` / `Ctrl+Shift+P`). The wizard detects what is available on your machine and shows only those options:
 
-### Interactive Cluster
+| Method | Requirement |
+|--------|------------|
+| **Azure CLI** | `az login` — workspaces auto-discovered from your Azure subscription |
+| **GCP ADC** | `gcloud auth application-default login` |
+| **~/.databrickscfg** | Databricks CLI already configured |
+| **Personal Access Token** | Workspace URL + token entered manually |
 
-```jsonc
-{
-  "catalystops.databricks.host": "https://myworkspace.cloud.databricks.com",
-  "catalystops.databricks.token": "dapi...",
-  "catalystops.databricks.clusterId": "0123-456789-abcdef"
-}
-```
+Cluster ID is only prompted when running a dry-run — not during connection setup.
 
-### Serverless
+### Manual Configuration
 
-Leave `clusterId` blank and set execution mode to `serverless`:
-
-```jsonc
-{
-  "catalystops.databricks.host": "https://myworkspace.cloud.databricks.com",
-  "catalystops.databricks.token": "dapi...",
-  "catalystops.databricks.executionMode": "serverless"
-}
-```
-
-### SSH Tunnel
-
-Route dry-run execution through an SSH tunnel to a cluster driver:
+You can also set values directly in `settings.json`:
 
 ```jsonc
-{
-  "catalystops.connection.sshTunnel.enabled": true,
-  "catalystops.connection.sshTunnel.connectionName": "my-cluster"
-}
-```
+// Interactive cluster (cluster ID set at dry-run time)
+{ "catalystops.databricks.host": "https://myworkspace.cloud.databricks.com",
+  "catalystops.databricks.token": "dapi..." }
 
-**Requirements:** Databricks CLI ≥ 0.269, VS Code Remote SSH extension, DBR 17+.
+// Serverless
+{ "catalystops.databricks.executionMode": "serverless" }
 
-### Using `~/.databrickscfg`
-
-CatalystOps reads your Databricks CLI config file automatically. Set the profile with:
-
-```jsonc
-{
-  "catalystops.databricks.configPath": "~/.databrickscfg",
-  "catalystops.databricks.profile": "DEFAULT"
-}
+// SSH tunnel
+{ "catalystops.connection.sshTunnel.enabled": true,
+  "catalystops.connection.sshTunnel.connectionName": "my-cluster" }
 ```
 
 ---

@@ -12,13 +12,13 @@ For other clients, add the URL shown in the CatalystOps Output panel:
 {
   "servers": {
     "catalystops": {
-      "url": "http://127.0.0.1:<port>/mcp"
+      "url": "http://127.0.0.1:49152/mcp"
     }
   }
 }
 ```
 
-The port is dynamic and logged on extension startup.
+The port defaults to **49152**. Change it via  in settings (restart VS Code to apply).
 
 ## Enabling / Disabling
 

@@ -146,19 +146,16 @@ Local analysis works immediately — no configuration needed.
 
 **2. Connect to Databricks** (for dry-run plan analysis) — run **CatalystOps: Configure Databricks Connection** from the Command Palette.
 
-```jsonc
-// Interactive cluster
-{ "catalystops.databricks.host": "https://myworkspace.cloud.databricks.com",
-  "catalystops.databricks.token": "dapi...",
-  "catalystops.databricks.clusterId": "0123-456789-abcdef" }
+The wizard auto-detects available auth methods and shows only what applies to you:
 
-// Serverless (leave clusterId blank)
-{ "catalystops.databricks.executionMode": "serverless" }
+| Method | Requirement |
+|--------|------------|
+| **Azure CLI** | Signed into `az login` — picks up workspaces automatically |
+| **GCP ADC** | Signed into `gcloud auth application-default login` |
+| **~/.databrickscfg** | Databricks CLI already configured |
+| **Personal Access Token** | Workspace URL + token |
 
-// SSH tunnel
-{ "catalystops.connection.sshTunnel.enabled": true,
-  "catalystops.connection.sshTunnel.connectionName": "my-cluster" }
-```
+Cluster ID is only prompted when running a dry-run — not during connection setup.
 
 **3. Analyze** — open a `.py` file. Local checks run automatically. Press `⌘⇧K` / `Ctrl+Shift+K` for a full dry-run plan analysis.
 
@@ -204,6 +201,7 @@ Local analysis works immediately — no configuration needed.
 | `catalystops.cost.queryBillingUsage` | `false` | Query `system.billing.usage` after each serverless run for actual cost |
 | `catalystops.billing.warehouseId` | `""` | SQL warehouse ID for billing queries (auto-discovers if blank) |
 | `catalystops.mcp.enabled` | `true` | Enable the MCP server |
+| `catalystops.mcp.port` | `49152` | Port for the MCP server (restart VS Code to apply) |
 | `catalystops.debug` | `false` | Log diagnostic details to the Output panel |
 
 ---
