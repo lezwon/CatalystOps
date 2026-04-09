@@ -7,6 +7,7 @@ import * as https from 'https';
 import * as url from 'url';
 import { logDebug } from '../logger';
 import { isAzureHost, getAzureCliToken, clearAzureTokenCache, AzureCliAuthError } from './azureCliAuth';
+import { isGcpHost, getGcpToken, clearGcpTokenCache, GcpAuthError } from './gcpAuth';
 
 export interface RequestOptions {
     host: string;
@@ -71,6 +72,12 @@ export async function apiRequest<T = unknown>(options: RequestOptions): Promise<
         } catch (err) {
             throw new AzureCliAuthError(err instanceof Error ? err.message : String(err));
         }
+    } else if (!token && isGcpHost(options.host)) {
+        try {
+            token = await getGcpToken();
+        } catch (err) {
+            throw new GcpAuthError(err instanceof Error ? err.message : String(err));
+        }
     }
 
     return makeRequest<T>({ ...options, token });
@@ -113,8 +120,8 @@ function makeRequest<T = unknown>(options: RequestOptions): Promise<ApiResponse<
             res.on('data', (chunk: Buffer) => chunks.push(chunk));
             res.on('end', () => {
                 const raw = Buffer.concat(chunks).toString('utf-8');
-                // Clear Azure token cache on 401 so the next call re-fetches from az CLI
-                if (res.statusCode === 401) { clearAzureTokenCache(); }
+                // Clear auth token caches on 401 so the next call re-fetches
+                if (res.statusCode === 401) { clearAzureTokenCache(); clearGcpTokenCache(); }
                 try {
                     const data = raw ? JSON.parse(raw) : {};
                     resolve({ statusCode: res.statusCode ?? 0, data: data as T });

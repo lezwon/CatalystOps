@@ -167,10 +167,11 @@
           },
           "catalystops.databricks.authType": {
             "type": "string",
-            "enum": ["pat", "azure-cli"],
+            "enum": ["pat", "azure-cli", "gcp-adc"],
             "enumDescriptions": [
               "Personal Access Token — use a PAT from the token field or ~/.databrickscfg",
-              "Azure CLI — authenticate using your active `az login` session; no token required"
+              "Azure CLI — authenticate using your active `az login` session; no token required",
+              "GCP ADC — authenticate using GCP Application Default Credentials (`gcloud auth application-default login`); no token required"
             ],
             "default": "pat",
             "description": "Authentication method. Use 'Configure Databricks Connection' command to set this automatically."
@@ -178,22 +179,25 @@
           "catalystops.databricks.token": {
             "type": "string",
             "default": "",
-            "description": "Databricks personal access token (only used when authType is 'pat' and no profile is set)"
+            "when": "config.catalystops.databricks.authType == 'pat'",
+            "description": "Databricks personal access token"
           },
           "catalystops.databricks.profile": {
             "type": "string",
             "default": "DEFAULT",
-            "description": "Databricks CLI config profile name (from ~/.databrickscfg)"
+            "when": "config.catalystops.databricks.authType == 'pat'",
+            "description": "Databricks CLI config profile name (from ~/.databrickscfg). Token is read from this profile."
           },
           "catalystops.databricks.configPath": {
             "type": "string",
             "default": "~/.databrickscfg",
+            "when": "config.catalystops.databricks.authType == 'pat'",
             "description": "Path to the Databricks CLI config file"
           },
           "catalystops.databricks.clusterId": {
             "type": "string",
             "default": "",
-            "description": "Interactive cluster ID used for dry-run analysis (required when executionMode is 'cluster')"
+            "description": "Interactive cluster ID for dry-run analysis. Leave blank to use serverless."
           },
           "catalystops.databricks.executionMode": {
             "type": "string",
@@ -202,7 +206,7 @@
               "serverless"
             ],
             "default": "cluster",
-            "description": "Execution mode for dry-run analysis. 'cluster' uses an interactive cluster (requires Cluster ID). 'serverless' uses Databricks Serverless Compute (requires Premium tier)."
+            "description": "Execution mode for dry-run analysis. 'cluster' requires a Cluster ID above. 'serverless' requires Databricks Premium tier."
           },
           "catalystops.dryRun.timeoutSeconds": {
             "type": "number",

@@ -21,6 +21,7 @@ import { updateMcpJobRunSnapshot } from '../mcp/mcpState';
 import { logDebug, logError } from '../logger';
 import { sendEvent } from '../telemetry';
 import { AzureCliAuthError, checkAzureCliLogin } from '../databricks/azureCliAuth';
+import { GcpAuthError, checkGcpAdcLogin } from '../databricks/gcpAuth';
 
 /**
  * Plan issue names that are already surfaced by local static code analysis.
@@ -57,6 +58,16 @@ export async function refreshJobsList(
             notifyAzureCliLogin();
             return;
         }
+    } else if (config.authType === 'gcp-adc') {
+        try {
+            await checkGcpAdcLogin();
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            jobsTreeProvider.setError(message);
+            sendEvent('jobs/refresh_failed', { error: message.substring(0, 200) });
+            notifyGcpAdcLogin();
+            return;
+        }
     }
 
     try {
@@ -82,6 +93,8 @@ export async function refreshJobsList(
         sendEvent('jobs/refresh_failed', { error: message.substring(0, 200) });
         if (err instanceof AzureCliAuthError) {
             notifyAzureCliLogin();
+        } else if (err instanceof GcpAuthError) {
+            notifyGcpAdcLogin();
         }
     }
 }
@@ -238,6 +251,20 @@ function notifyAzureCliLogin(): void {
         if (action === 'Open Terminal') {
             void vscode.commands.executeCommand('workbench.action.terminal.new').then(() => {
                 void vscode.commands.executeCommand('workbench.action.terminal.sendSequence', { text: 'az login\n' });
+            });
+        }
+    });
+}
+
+/** Show a notification prompting the user to run `gcloud auth application-default login`. */
+function notifyGcpAdcLogin(): void {
+    void vscode.window.showErrorMessage(
+        'CatalystOps: GCP Application Default Credentials expired or not configured.',
+        'Open Terminal',
+    ).then(action => {
+        if (action === 'Open Terminal') {
+            void vscode.commands.executeCommand('workbench.action.terminal.new').then(() => {
+                void vscode.commands.executeCommand('workbench.action.terminal.sendSequence', { text: 'gcloud auth application-default login\n' });
             });
         }
     });

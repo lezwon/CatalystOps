@@ -17,9 +17,11 @@ import {
     listAzureWorkspaces,
     getAzureWorkspaceUrl,
 } from '../databricks/azureCliAuth';
+import { checkGcpAdcLogin } from '../databricks/gcpAuth';
 
 // ─── Labels used to identify picks ────────────────────────────────────────────
 const LABEL_AZURE  = '$(azure) Azure CLI';
+const LABEL_GCP    = '$(cloud) GCP (gcloud)';
 const LABEL_CFG    = '$(file-text) ~/.databrickscfg';
 const LABEL_PAT    = '$(key) Personal Access Token';
 
@@ -30,8 +32,9 @@ export async function configureConnection(): Promise<void> {
     const configPath = config.get<string>('databricks.configPath', '~/.databrickscfg');
 
     // Detect available auth methods in parallel — failures are soft (null)
-    const [azureAccount, profiles] = await Promise.all([
+    const [azureAccount, gcpAccount, profiles] = await Promise.all([
         checkAzureCliLogin().catch(() => null),
+        checkGcpAdcLogin().catch(() => null),
         Promise.resolve(listProfiles(configPath)),
     ]);
 
@@ -43,6 +46,14 @@ export async function configureConnection(): Promise<void> {
             label: LABEL_AZURE,
             description: `Signed in as ${azureAccount.user}`,
             detail: 'Fetch your Databricks workspaces from Azure and authenticate with az login',
+        });
+    }
+
+    if (gcpAccount) {
+        items.push({
+            label: LABEL_GCP,
+            description: `Signed in as ${gcpAccount.account}`,
+            detail: 'Authenticate using GCP Application Default Credentials (gcloud auth application-default login)',
         });
     }
 
@@ -72,6 +83,8 @@ export async function configureConnection(): Promise<void> {
 
     if (picked.label === LABEL_AZURE) {
         await azureCliFlow(config, target);
+    } else if (picked.label === LABEL_GCP) {
+        await gcpAdcFlow(config, target);
     } else if (picked.label === LABEL_CFG) {
         await databricksCfgFlow(config, target, profiles);
     } else {
@@ -140,6 +153,36 @@ async function azureCliFlow(
     const modeLabel = clusterId ? `cluster ${clusterId}` : 'serverless';
     vscode.window.showInformationMessage(
         `CatalystOps: Connected to "${workspacePick.label}" via Azure CLI — ${modeLabel}`,
+    );
+}
+
+// ─── GCP ADC flow ─────────────────────────────────────────────────────────────
+
+async function gcpAdcFlow(
+    config: vscode.WorkspaceConfiguration,
+    target: vscode.ConfigurationTarget,
+): Promise<void> {
+    const host = await vscode.window.showInputBox({
+        prompt: 'Databricks workspace URL',
+        placeHolder: 'https://1234567890123456.7.gcp.databricks.com',
+        value: config.get<string>('databricks.host', ''),
+    });
+    if (host === undefined) { return; }
+
+    const clusterId = await askClusterId(config);
+    if (clusterId === undefined) { return; }
+
+    await saveSettings(config, target, {
+        host,
+        token: '',
+        authType: 'gcp-adc',
+        clusterId,
+        profile: '',
+    });
+
+    const modeLabel = clusterId ? `cluster ${clusterId}` : 'serverless';
+    vscode.window.showInformationMessage(
+        `CatalystOps: Connected to "${host}" via GCP ADC — ${modeLabel}`,
     );
 }
 
@@ -237,7 +280,7 @@ async function askClusterId(config: vscode.WorkspaceConfiguration): Promise<stri
 interface SettingsToSave {
     host: string;
     token: string;
-    authType: 'pat' | 'azure-cli';
+    authType: 'pat' | 'azure-cli' | 'gcp-adc';
     clusterId: string;
     profile: string;
 }
