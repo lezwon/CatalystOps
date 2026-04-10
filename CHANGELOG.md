@@ -2,6 +2,13 @@
 
 All notable changes to CatalystOps are documented here.
 
+## [0.11.0]
+
+### Added
+- **OAuth U2M browser login** — authenticate to any Databricks workspace (AWS, Azure, GCP) by logging in via browser. No tokens to copy/paste. Refresh tokens are stored securely in VS Code's secret storage and auto-refreshed.
+
+---
+
 ## [0.10.0]
 
 ### Added

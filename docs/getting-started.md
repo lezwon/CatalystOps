@@ -23,6 +23,7 @@ Run **CatalystOps: Configure Databricks Connection** from the Command Palette (`
 | **Azure CLI** | `az login` — workspaces auto-discovered from your Azure subscription |
 | **GCP ADC** | `gcloud auth application-default login` |
 | **~/.databrickscfg** | Databricks CLI already configured |
+| **OAuth / Browser Login** | Any workspace — opens browser, no token needed |
 | **Personal Access Token** | Workspace URL + token entered manually |
 
 Cluster ID is only prompted when running a dry-run — not during connection setup.

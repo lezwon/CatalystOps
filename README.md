@@ -153,6 +153,7 @@ The wizard auto-detects available auth methods and shows only what applies to yo
 | **Azure CLI** | Signed into `az login` — picks up workspaces automatically |
 | **GCP ADC** | Signed into `gcloud auth application-default login` |
 | **~/.databrickscfg** | Databricks CLI already configured |
+| **OAuth / Browser Login** | Any workspace — log in via browser, no token needed |
 | **Personal Access Token** | Workspace URL + token |
 
 Cluster ID is only prompted when running a dry-run — not during connection setup.
