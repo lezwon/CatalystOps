@@ -8,6 +8,7 @@
 
 import * as vscode from 'vscode';
 import { getConnectionConfig } from '../config/settings';
+import { setSessionAuthType } from '../databricks/client';
 import { listJobs, getLastRun, getRunDetails, getClusterEventLogPath, getJobRunSource, JobSummary, RunSummary } from '../databricks/jobsApi';
 import { fetchPlansFromEventLog } from '../databricks/eventLogParser';
 import { parsePlan } from '../analysis/planParser';
@@ -44,6 +45,7 @@ export async function refreshJobsList(
         jobsTreeProvider.setError('Databricks not configured. Run "CatalystOps: Configure Connection" first.');
         return;
     }
+    setSessionAuthType(config.authType);
 
     jobsTreeProvider.setLoading(true);
     sendEvent('jobs/refresh_start');
@@ -110,6 +112,7 @@ export async function analyzeJobRun(
         vscode.window.showErrorMessage('CatalystOps: Databricks not configured. Run "Configure Connection" first.');
         return;
     }
+    setSessionAuthType(config.authType);
 
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,

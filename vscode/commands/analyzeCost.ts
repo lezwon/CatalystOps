@@ -7,6 +7,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import { getConnectionConfig } from '../config/settings';
+import { setSessionAuthType } from '../databricks/client';
 import { ensureClusterRunning } from '../databricks/clusterManager';
 import { executeCommand } from '../databricks/commandExecution';
 import { checkSshAvailable, executeViaSsh } from '../databricks/sshExecution';
@@ -184,6 +185,7 @@ export async function analyzeCost(
 
     // Try cluster analysis
     const config = getConnectionConfig();
+    if (config) { setSessionAuthType(config.authType); }
     sendEvent('command/analyze_cost_mode', { executionMode: config?.executionMode ?? 'unknown' });
     const timeoutSeconds = vscode.workspace.getConfiguration('catalystops').get<number>('dryRun.timeoutSeconds', 300);
     const dryRunTimeoutMs = Math.max(timeoutSeconds, 30) * 1000;

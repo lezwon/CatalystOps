@@ -171,12 +171,14 @@
             "enum": [
               "pat",
               "azure-cli",
-              "gcp-adc"
+              "gcp-adc",
+              "oauth-u2m"
             ],
             "enumDescriptions": [
               "Personal Access Token — use a PAT from the token field or ~/.databrickscfg",
               "Azure CLI — authenticate using your active `az login` session; no token required",
-              "GCP ADC — authenticate using GCP Application Default Credentials (`gcloud auth application-default login`); no token required"
+              "GCP ADC — authenticate using GCP Application Default Credentials (`gcloud auth application-default login`); no token required",
+              "OAuth U2M — browser-based login using Databricks OAuth PKCE; works for any workspace"
             ],
             "default": "pat",
             "description": "Authentication method. Use 'Configure Databricks Connection' command to set this automatically."

@@ -8,10 +8,12 @@ import * as url from 'url';
 import { logDebug } from '../logger';
 import { isAzureHost, getAzureCliToken, clearAzureTokenCache, AzureCliAuthError } from './azureCliAuth';
 import { isGcpHost, getGcpToken, clearGcpTokenCache, GcpAuthError } from './gcpAuth';
+import { getOAuthToken, clearOAuthTokenCache, OAuthU2mError } from './oauthU2mAuth';
 
 export interface RequestOptions {
     host: string;
     token: string;
+    authType?: 'pat' | 'azure-cli' | 'gcp-adc' | 'oauth-u2m';
     method: 'GET' | 'POST' | 'PUT' | 'DELETE';
     path: string;
     body?: unknown;
@@ -60,13 +62,32 @@ function toCurl(options: RequestOptions, bodyStr: string | undefined): string {
 }
 
 /**
+ * Session-level auth type override.
+ * Commands set this via setSessionAuthType() before making API calls so that
+ * all apiRequest() calls in a command inherit the correct auth type without
+ * requiring changes to every API function signature.
+ */
+let _sessionAuthType: string | undefined;
+
+export function setSessionAuthType(authType: string | undefined): void {
+    _sessionAuthType = authType;
+}
+
+/**
  * Make an authenticated request to the Databricks REST API.
  * If token is empty and the host is an Azure workspace, fetches a token via Azure CLI automatically.
  */
 export async function apiRequest<T = unknown>(options: RequestOptions): Promise<ApiResponse<T>> {
     let token = options.token;
+    const authType = options.authType ?? _sessionAuthType;
 
-    if (!token && isAzureHost(options.host)) {
+    if (authType === 'oauth-u2m') {
+        try {
+            token = await getOAuthToken(options.host);
+        } catch (err) {
+            throw new OAuthU2mError(err instanceof Error ? err.message : String(err));
+        }
+    } else if (!token && isAzureHost(options.host)) {
         try {
             token = await getAzureCliToken();
         } catch (err) {
@@ -121,7 +142,7 @@ function makeRequest<T = unknown>(options: RequestOptions): Promise<ApiResponse<
             res.on('end', () => {
                 const raw = Buffer.concat(chunks).toString('utf-8');
                 // Clear auth token caches on 401 so the next call re-fetches
-                if (res.statusCode === 401) { clearAzureTokenCache(); clearGcpTokenCache(); }
+                if (res.statusCode === 401) { clearAzureTokenCache(); clearGcpTokenCache(); clearOAuthTokenCache(options.host); }
                 try {
                     const data = raw ? JSON.parse(raw) : {};
                     resolve({ statusCode: res.statusCode ?? 0, data: data as T });

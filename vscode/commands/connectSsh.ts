@@ -18,6 +18,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { getConnectionConfig } from '../config/settings';
+import { setSessionAuthType } from '../databricks/client';
 import { listClusters, startCluster, stopCluster, getClusterState, getClusterSpec, editCluster, restartCluster, getCurrentUserEmail, ensureSshSecretScope, ClusterInfo, ClusterState } from '../databricks/clustersApi';
 import { ClustersTreeDataProvider } from '../views/clustersTreeView';
 import { logDebug, logError } from '../logger';
@@ -60,6 +61,7 @@ export async function startClusterCommand(
         void vscode.window.showErrorMessage('CatalystOps: Databricks not configured. Run "Configure Connection" first.');
         return;
     }
+    setSessionAuthType(config.authType);
     try {
         await startCluster(config.host, config.token, cluster.clusterId);
         sendEvent('cluster/start', { clusterState: cluster.state });
@@ -98,6 +100,7 @@ export async function stopClusterCommand(
         void vscode.window.showErrorMessage('CatalystOps: Databricks not configured.');
         return;
     }
+    setSessionAuthType(config.authType);
 
     const confirm = await vscode.window.showWarningMessage(
         `Stop cluster "${cluster.clusterName}"? Running jobs will be terminated.`,
@@ -257,6 +260,7 @@ export async function refreshClustersList(provider: ClustersTreeDataProvider): P
         provider.setError('Databricks not configured. Run "CatalystOps: Configure Connection" first.');
         return;
     }
+    setSessionAuthType(config.authType);
 
     provider.setLoading(true);
     sendEvent('clusters/refresh_start');
@@ -313,6 +317,7 @@ export async function connectClusterSsh(
         void vscode.window.showErrorMessage('CatalystOps: Databricks not configured. Run "Configure Connection" first.');
         return;
     }
+    setSessionAuthType(config.authType);
 
     // Check CLI before showing progress
     const cliVersion = await getDatabricksCLIVersion();

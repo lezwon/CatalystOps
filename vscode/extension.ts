@@ -35,8 +35,10 @@ import { updateMcpSnapshot } from './mcp/mcpState';
 import { onCacheUpdated, getCachedResults, getCachedPlanIssues, getDataFrameLineMap } from './analysis/analysisCache';
 import { buildPlanTrees } from './analysis/planTreeBuilder';
 import { getConnectionConfig } from './config/settings';
+import { setExtensionContext } from './extensionContext';
 
 export function activate(context: vscode.ExtensionContext): void {
+    setExtensionContext(context);
     initOutputChannel(context);
     initTelemetry(context);
     sendEvent('extension/activated');

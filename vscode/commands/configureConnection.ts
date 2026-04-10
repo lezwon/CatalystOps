@@ -19,12 +19,14 @@ import {
     getAzureWorkspaceUrl,
 } from '../databricks/azureCliAuth';
 import { checkGcpAdcLogin } from '../databricks/gcpAuth';
+import { startOAuthFlow, checkOAuthConfigured } from '../databricks/oauthU2mAuth';
 
 // ─── Labels used to identify picks ────────────────────────────────────────────
 const LABEL_AZURE  = '$(azure) Azure CLI';
 const LABEL_GCP    = '$(cloud) GCP (gcloud)';
 const LABEL_CFG    = '$(file-text) ~/.databrickscfg';
 const LABEL_PAT    = '$(key) Personal Access Token';
+const LABEL_OAUTH  = '$(globe) OAuth / Browser Login';
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
@@ -67,6 +69,12 @@ export async function configureConnection(): Promise<void> {
     }
 
     items.push({
+        label: LABEL_OAUTH,
+        description: 'Log in via browser — works for any Databricks workspace',
+        detail: 'Opens your browser to complete the login. No token to copy/paste.',
+    });
+
+    items.push({
         label: LABEL_PAT,
         description: 'Enter workspace URL and personal access token manually',
     });
@@ -88,6 +96,8 @@ export async function configureConnection(): Promise<void> {
         await gcpAdcFlow(config, target);
     } else if (picked.label === LABEL_CFG) {
         await databricksCfgFlow(config, target, profiles);
+    } else if (picked.label === LABEL_OAUTH) {
+        await oauthFlow(config, target);
     } else {
         await manualPatFlow(config, target);
     }
@@ -215,6 +225,43 @@ async function databricksCfgFlow(
     );
 }
 
+// ─── OAuth U2M flow ───────────────────────────────────────────────────────────
+
+async function oauthFlow(
+    config: vscode.WorkspaceConfiguration,
+    target: vscode.ConfigurationTarget,
+): Promise<void> {
+    const currentHost = config.get<string>('databricks.host', '');
+    const isAlreadyConfigured = currentHost ? await checkOAuthConfigured(currentHost).catch(() => false) : false;
+
+    const host = await vscode.window.showInputBox({
+        prompt: 'Databricks workspace URL',
+        placeHolder: 'https://myworkspace.cloud.databricks.com',
+        value: currentHost,
+    });
+    if (host === undefined) { return; }
+
+    try {
+        await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: 'CatalystOps: Opening browser for Databricks login…', cancellable: false },
+            async () => { await startOAuthFlow(host); },
+        );
+    } catch (err) {
+        vscode.window.showErrorMessage(`CatalystOps: OAuth login failed — ${err instanceof Error ? err.message : String(err)}`);
+        return;
+    }
+
+    await saveSettings(config, target, {
+        host,
+        token: '',
+        authType: 'oauth-u2m',
+        profile: '',
+    });
+
+    sendEvent('connection/configured', { authType: 'oauth-u2m' });
+    vscode.window.showInformationMessage(`CatalystOps: Connected to "${host}" via OAuth`);
+}
+
 // ─── Manual PAT flow ──────────────────────────────────────────────────────────
 
 async function manualPatFlow(
@@ -252,7 +299,7 @@ async function manualPatFlow(
 interface SettingsToSave {
     host: string;
     token: string;
-    authType: 'pat' | 'azure-cli' | 'gcp-adc';
+    authType: 'pat' | 'azure-cli' | 'gcp-adc' | 'oauth-u2m';
     profile: string;
 }
 

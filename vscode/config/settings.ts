@@ -10,7 +10,7 @@ import { isGcpHost } from '../databricks/gcpAuth';
 export interface DatabricksConnectionConfig {
     host: string;
     token: string;
-    authType: 'pat' | 'azure-cli' | 'gcp-adc';
+    authType: 'pat' | 'azure-cli' | 'gcp-adc' | 'oauth-u2m';
     clusterId?: string;
     executionMode: 'cluster' | 'serverless' | 'ssh';
     sshConnectionName?: string;
@@ -44,8 +44,8 @@ export function getConnectionConfig(): DatabricksConnectionConfig | undefined {
     const fileConfig = readDatabricksConfig(configPath, profile);
     if (fileConfig) {
         if (!host) { host = fileConfig.host; }
-        // Don't pull a PAT from .databrickscfg when CLI-based auth is explicitly configured
-        if (!token && configuredAuthType !== 'azure-cli' && configuredAuthType !== 'gcp-adc') { token = fileConfig.token; }
+        // Don't pull a PAT from .databrickscfg when CLI-based or OAuth auth is explicitly configured
+        if (!token && configuredAuthType !== 'azure-cli' && configuredAuthType !== 'gcp-adc' && configuredAuthType !== 'oauth-u2m') { token = fileConfig.token; }
         if (!clusterId && fileConfig.clusterId) { clusterId = fileConfig.clusterId; }
     }
 
@@ -61,11 +61,12 @@ export function getConnectionConfig(): DatabricksConnectionConfig | undefined {
     }
 
     // Determine auth type: explicit setting takes priority; auto-detect from host when no token
-    const authType: 'pat' | 'azure-cli' | 'gcp-adc' =
-        configuredAuthType === 'azure-cli' ? 'azure-cli' :
-        configuredAuthType === 'gcp-adc'   ? 'gcp-adc'  :
-        (!token && isAzureHost(host))      ? 'azure-cli' :
-        (!token && isGcpHost(host))        ? 'gcp-adc'  : 'pat';
+    const authType: 'pat' | 'azure-cli' | 'gcp-adc' | 'oauth-u2m' =
+        configuredAuthType === 'azure-cli'  ? 'azure-cli'  :
+        configuredAuthType === 'gcp-adc'    ? 'gcp-adc'    :
+        configuredAuthType === 'oauth-u2m'  ? 'oauth-u2m'  :
+        (!token && isAzureHost(host))       ? 'azure-cli'  :
+        (!token && isGcpHost(host))         ? 'gcp-adc'    : 'pat';
 
     const missing: string[] = [];
     if (!host) { missing.push('host'); }
