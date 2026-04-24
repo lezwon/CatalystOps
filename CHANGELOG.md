@@ -2,6 +2,15 @@
 
 All notable changes to CatalystOps are documented here.
 
+## [0.12.0]
+
+### Added
+- **Databricks Asset Bundle (DAB) sidebar** — a new **Bundle Tasks** panel lists every `spark_python_task` and `notebook_task` found in `databricks.yml` and all `include:`-referenced resource files. Click any task to open the source file.
+- **DAB YAML linting** — 40+ schema-aware validation rules fire inline as you edit `databricks.yml` and resource YAMLs. Catches invalid keys, wrong enum values (`data_security_mode`, `runtime_engine`, `run_if`, `pause_status`, periodic trigger units, health rule metrics), Alert v2 schema mistakes (`condition` → `evaluation`, wrong subscription nesting), permission-level mismatches per resource type, volumes using `permissions` instead of `grants`, missing `spec.client` in job environments, mutually exclusive fields, duplicate `task_key`, missing file references, and more.
+- **Bundle target in connection wizard** — "Use Bundle Target" option auto-populates the workspace host from `databricks.yml` targets, letting you pick a dev or prod target without typing a URL.
+
+---
+
 ## [0.11.0]
 
 ### Added

@@ -31,11 +31,14 @@ import { showDagWebview, disposeDagWebview } from './views/dagWebview';
 import { showBillingDashboard } from './commands/showBillingDashboard';
 import { Severity } from './models/types';
 import { startMcpServer, stopMcpServer } from './mcp/server';
-import { updateMcpSnapshot } from './mcp/mcpState';
+import { updateMcpSnapshot, updateMcpBundleConfig } from './mcp/mcpState';
 import { onCacheUpdated, getCachedResults, getCachedPlanIssues, getDataFrameLineMap } from './analysis/analysisCache';
 import { buildPlanTrees } from './analysis/planTreeBuilder';
 import { getConnectionConfig } from './config/settings';
 import { setExtensionContext } from './extensionContext';
+import { findBundleFile, parseBundleFile, BundleConfig } from './databricks/bundleParser';
+import { BundleTasksTreeDataProvider, BundleTaskItem } from './views/bundleTasksTreeView';
+import { BundleLintProvider } from './providers/bundleLintProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
     setExtensionContext(context);
@@ -115,6 +118,49 @@ export function activate(context: vscode.ExtensionContext): void {
         if (getConnectionConfig()) {
             void refreshClustersList(clustersTreeProvider);
         }
+
+        // Bundle Tasks tree view — auto-detects databricks.yml in workspace root
+        const bundleTasksProvider = new BundleTasksTreeDataProvider();
+        vscode.window.registerTreeDataProvider('catalystops.bundleTasksTree', bundleTasksProvider);
+
+        // Bundle YAML linter
+        const bundleLint = new BundleLintProvider();
+        context.subscriptions.push({ dispose: () => bundleLint.dispose() });
+
+        function refreshBundleConfig(): void {
+            const folders = vscode.workspace.workspaceFolders ?? [];
+            const bundleFile = findBundleFile(folders);
+            const config: BundleConfig | undefined = bundleFile ? parseBundleFile(bundleFile) : undefined;
+            bundleTasksProvider.setBundle(config);
+            bundleLint.setBundle(config);
+            updateMcpBundleConfig(config);
+            void vscode.commands.executeCommand('setContext', 'catalystops.bundleDetected', !!config);
+            if (config) {
+                sendEvent('bundle/loaded', {
+                    taskCount: String(config.tasks.length),
+                    targetCount: String(config.targets.length),
+                    includedFileCount: String(config.includedFiles.length),
+                });
+            }
+        }
+        refreshBundleConfig();
+
+        // Watch for changes to databricks.yml and any included YAML files.
+        // The root bundle file watcher is an exact pattern; we add a second
+        // watcher for all *.yml so that changes to included resource files
+        // (e.g. resources/jobs/etl.yml) also trigger a refresh.
+        const bundleWatcher = vscode.workspace.createFileSystemWatcher('**/databricks.{yml,yaml}');
+        const includedWatcher = vscode.workspace.createFileSystemWatcher('**/*.{yml,yaml}');
+        context.subscriptions.push(
+            bundleWatcher,
+            bundleWatcher.onDidCreate(() => refreshBundleConfig()),
+            bundleWatcher.onDidChange(() => refreshBundleConfig()),
+            bundleWatcher.onDidDelete(() => refreshBundleConfig()),
+            includedWatcher,
+            includedWatcher.onDidChange(() => refreshBundleConfig()),
+            includedWatcher.onDidCreate(() => refreshBundleConfig()),
+            includedWatcher.onDidDelete(() => refreshBundleConfig()),
+        );
 
         // Register commands
         context.subscriptions.push(
@@ -293,6 +339,32 @@ export function activate(context: vscode.ExtensionContext): void {
             }),
 
             { dispose: () => { disposeDagWebview(); } },
+
+            // Bundle Task commands
+            vscode.commands.registerCommand('catalystops.openBundleTask', async (item: unknown) => {
+                const task = item instanceof BundleTaskItem ? item.task : undefined;
+                if (!task) { return; }
+                try {
+                    const doc = await vscode.workspace.openTextDocument(task.pythonFile);
+                    await vscode.window.showTextDocument(doc);
+                } catch {
+                    vscode.window.showErrorMessage(`CatalystOps: Cannot open "${task.pythonFile}"`);
+                }
+            }),
+
+            vscode.commands.registerCommand('catalystops.analyzeBundleTask', async (item: unknown) => {
+                const task = item instanceof BundleTaskItem ? item.task : undefined;
+                if (!task) { return; }
+                try {
+                    const doc = await vscode.workspace.openTextDocument(task.pythonFile);
+                    await vscode.window.showTextDocument(doc);
+                } catch {
+                    vscode.window.showErrorMessage(`CatalystOps: Cannot open "${task.pythonFile}"`);
+                    return;
+                }
+                sendEvent('bundle/task_analyzed', { jobName: task.jobName, taskKey: task.taskKey });
+                return analyzeCost(context, issuesTreeProvider);
+            }),
         );
 
         // Re-evaluate Databricks context when relevant settings change
@@ -328,6 +400,34 @@ export function activate(context: vscode.ExtensionContext): void {
             }).catch(err => {
                 logDebug(`MCP server failed to start: ${err instanceof Error ? err.message : String(err)}`);
             });
+        }
+
+        // Bundle YAML linting — lint on open, change, save, and close
+        context.subscriptions.push(
+            vscode.workspace.onDidOpenTextDocument(doc => {
+                if (bundleLint.isBundleFile(doc.uri.fsPath)) {
+                    bundleLint.lintDocument(doc);
+                }
+            }),
+            vscode.workspace.onDidChangeTextDocument(e => {
+                if (bundleLint.isBundleFile(e.document.uri.fsPath)) {
+                    bundleLint.lintDocumentDebounced(e.document);
+                }
+            }),
+            vscode.workspace.onDidSaveTextDocument(doc => {
+                if (bundleLint.isBundleFile(doc.uri.fsPath)) {
+                    bundleLint.lintDocument(doc);
+                }
+            }),
+            vscode.workspace.onDidCloseTextDocument(doc => {
+                bundleLint.clearDocument(doc.uri);
+            }),
+        );
+        // Lint any already-open bundle files
+        for (const doc of vscode.workspace.textDocuments) {
+            if (bundleLint.isBundleFile(doc.uri.fsPath)) {
+                bundleLint.lintDocument(doc);
+            }
         }
 
         // Register providers for Python files

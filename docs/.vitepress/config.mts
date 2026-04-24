@@ -40,6 +40,7 @@ export default defineConfig({
           { text: 'Clusters & SSH', link: '/clusters-ssh' },
           { text: 'Billing Dashboard', link: '/billing' },
           { text: 'Static Cost Estimation', link: '/static-cost' },
+          { text: 'Asset Bundle Support', link: '/bundle' },
           { text: 'MCP Server', link: '/mcp' },
         ],
       },

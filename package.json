@@ -2,7 +2,7 @@
   "name": "catalystops",
   "displayName": "CatalystOps - PySpark Optimizer",
   "description": "Analyze PySpark code for performance issues using Catalyst execution plan analysis",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "publisher": "CatalystOps",
   "repository": {
     "type": "git",
@@ -147,6 +147,16 @@
         "command": "catalystops.quickfix.addJoinCondition",
         "title": "Add Join Condition",
         "icon": "$(link)"
+      },
+      {
+        "command": "catalystops.openBundleTask",
+        "title": "Open File",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "catalystops.analyzeBundleTask",
+        "title": "Analyze (Dry Run)",
+        "icon": "$(play)"
       }
     ],
     "keybindings": [
@@ -359,6 +369,11 @@
           "name": "Clusters",
           "icon": "media/icon-mono.svg",
           "when": "catalystops.databricksConfigured"
+        },
+        {
+          "id": "catalystops.bundleTasksTree",
+          "name": "Bundle Tasks",
+          "icon": "media/icon-mono.svg"
         }
       ]
     },
@@ -410,6 +425,17 @@
             },
             "completionEvents": [
               "onCommand:catalystops.analyzeJobRun"
+            ]
+          },
+          {
+            "id": "catalystops.gettingStarted.bundle",
+            "title": "Databricks Asset Bundle Support",
+            "description": "CatalystOps detects databricks.yml and shows bundle tasks in a sidebar panel, lints YAML files inline with 40+ rules, and adds a Bundle Target option to the connection wizard.",
+            "media": {
+              "markdown": "media/walkthrough/10-bundle.md"
+            },
+            "completionEvents": [
+              "onView:catalystops.bundleTasksTree"
             ]
           },
           {
@@ -497,6 +523,11 @@
           "command": "catalystops.quickfix.addJoinCondition",
           "when": "view == catalystops.explainTree && viewItem == join-cartesian",
           "group": "inline@2"
+        },
+        {
+          "command": "catalystops.analyzeBundleTask",
+          "when": "view == catalystops.bundleTasksTree && viewItem == catalystops.bundleTaskItem",
+          "group": "inline@1"
         }
       ]
     }
@@ -521,6 +552,7 @@
     "docs:deploy": "npm run docs:build && cp -r docs/.vitepress/dist/. ../catalystops-web/docs/"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/mocha": "^10.0.6",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",

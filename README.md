@@ -97,6 +97,30 @@ Right-click a cluster for **Stop Cluster** and **Reset SSH Host** (clears cached
 
 ---
 
+### Databricks Asset Bundle (DAB) Support
+
+CatalystOps detects `databricks.yml` in your workspace and provides two features for bundle projects:
+
+**Bundle Tasks sidebar** — a dedicated panel lists every `spark_python_task` and `notebook_task` found across `databricks.yml` and all `include:`-referenced resource files. Click any task to open its source file. Run the inline **Analyze** button to execute a dry-run plan analysis on that task's script.
+
+**YAML schema linting** — 40+ validation rules fire inline as you edit bundle YAML files:
+
+| Category | Examples |
+|----------|---------|
+| Invalid keys | Unknown top-level keys, unknown resource types |
+| Enum values | `data_security_mode`, `runtime_engine`, `run_if`, `pause_status`, `periodic.unit`, health metrics |
+| Alert v2 schema | `condition` → `evaluation`, wrong subscription nesting, `cron_schedule` → `quartz_cron_schedule` |
+| Permission levels | Jobs (`CAN_VIEW`, `CAN_MANAGE_RUN`, `CAN_MANAGE`) differ from dashboards/alerts (`CAN_READ`, `CAN_RUN`, `CAN_EDIT`); volumes use `grants` not `permissions` |
+| Mutual exclusions | `schedule` + `continuous`, `job_cluster_key` + `existing_cluster_id` |
+| Required fields | Missing `task_key`, job `name`, environment `spec.client` |
+| Ranges | `num_workers`, `max_concurrent_runs`, `autotermination_minutes` |
+| File references | `python_file` and local `notebook_path` existence checks |
+| Deprecated fields | `photon: true` → `runtime_engine: PHOTON`, `jar_uri` |
+
+The **Configure Databricks Connection** wizard also shows a **Use Bundle Target** option when a `databricks.yml` is present, pre-filling the workspace host from your target definitions.
+
+---
+
 ### Billing Dashboard
 
 Queries `system.billing.usage` via Databricks SQL and shows spend by user, job, and workload type. Supports Day / Week / Month / Custom ranges. Results are cached for 1 hour; click Refresh to force a live query.
@@ -123,6 +147,7 @@ CatalystOps exposes live analysis data to Claude, GitHub Copilot (VS Code 1.99+)
 | `list_job_runs` | Jobs and their most recent run status |
 | `get_job_run_plan` | Fetch plan issues from a historical run by ID |
 | `get_last_job_run_analysis` | Plan issues from the last job analyzed in VS Code |
+| `list_bundle_tasks` | DAB tasks (job name, task key, type, file path) from databricks.yml |
 
 **Resources:** `catalystops://issues/current`, `catalystops://plans/last`, `catalystops://billing/summary`
 

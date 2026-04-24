@@ -44,6 +44,7 @@ The MCP server is enabled by default. Disable it with:
 | `list_job_runs` | List jobs and their most recent run status |
 | `get_job_run_plan` | Fetch plan issues from a historical job run by ID |
 | `get_last_job_run_analysis` | Get plan issues from the last job analyzed in VS Code |
+| `list_bundle_tasks` | DAB tasks (job name, task key, type, file path) from databricks.yml |
 
 ## Resources
 

@@ -6,6 +6,7 @@
 import { CodeIssue } from '../models/types';
 import { PlanIssue } from '../analysis/planParser';
 import { AnalysisResult } from '../models/types';
+import { BundleConfig } from '../databricks/bundleParser';
 
 export interface McpIssueSnapshot {
     filePath: string;
@@ -30,6 +31,7 @@ export interface McpJobRunSnapshot {
 let _issueSnapshot: McpIssueSnapshot | null = null;
 let _planSnapshot: McpPlanSnapshot | null = null;
 let _jobRunSnapshot: McpJobRunSnapshot | null = null;
+let _bundleConfig: BundleConfig | null = null;
 
 export function updateMcpSnapshot(snapshot: McpIssueSnapshot): void {
     _issueSnapshot = snapshot;
@@ -53,4 +55,12 @@ export function updateMcpJobRunSnapshot(snapshot: McpJobRunSnapshot): void {
 
 export function getMcpJobRunSnapshot(): McpJobRunSnapshot | null {
     return _jobRunSnapshot;
+}
+
+export function updateMcpBundleConfig(config: BundleConfig | undefined): void {
+    _bundleConfig = config ?? null;
+}
+
+export function getMcpBundleConfig(): BundleConfig | null {
+    return _bundleConfig;
 }

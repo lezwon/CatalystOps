@@ -11,7 +11,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod/v4';
 import { analyzeCode } from '../analysis/codeAnalyzer';
-import { getMcpSnapshot, getMcpJobRunSnapshot } from './mcpState';
+import { getMcpSnapshot, getMcpJobRunSnapshot, getMcpBundleConfig } from './mcpState';
 import { loadFromCache, cacheKey } from '../billing/billingCache';
 import { computeSummary, dateRangeForPeriod } from '../billing/billingTypes';
 import { getCachedPlanIssues, getCachedResults, onCacheUpdated, onDryRunError } from '../analysis/analysisCache';
@@ -605,6 +605,39 @@ function createMcpServer(context: vscode.ExtensionContext): McpServer {
                     content: [{ type: 'text' as const, text: `Failed to fetch job run plan: ${err instanceof Error ? err.message : String(err)}` }],
                 };
             }
+        },
+    );
+
+    // ── Tool: list_bundle_tasks ───────────────────────────────────────────────
+
+    server.tool(
+        'list_bundle_tasks',
+        'Lists all Databricks Asset Bundle (DAB) tasks found in databricks.yml and included resource files. Returns job names, task keys, task types (spark_python_task, notebook_task), and source file paths. Returns a message if no bundle is detected in the workspace.',
+        {},
+        async () => {
+            const bundle = getMcpBundleConfig();
+            if (!bundle) {
+                return {
+                    content: [{ type: 'text' as const, text: JSON.stringify({ message: 'No databricks.yml found in the workspace. Open a Databricks Asset Bundle project to use this tool.' }, null, 2) }],
+                };
+            }
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify({
+                        bundleName: bundle.name,
+                        bundlePath: bundle.bundlePath,
+                        targets: bundle.targets.map(t => ({ name: t.name, host: t.host })),
+                        taskCount: bundle.tasks.length,
+                        tasks: bundle.tasks.map(t => ({
+                            jobName: t.jobName,
+                            taskKey: t.taskKey,
+                            taskType: t.taskType,
+                            pythonFile: t.pythonFile,
+                        })),
+                    }, null, 2),
+                }],
+            };
         },
     );
 

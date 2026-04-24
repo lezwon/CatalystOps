@@ -20,13 +20,15 @@ import {
 } from '../databricks/azureCliAuth';
 import { checkGcpAdcLogin } from '../databricks/gcpAuth';
 import { startOAuthFlow, checkOAuthConfigured } from '../databricks/oauthU2mAuth';
+import { findBundleFile, parseBundleFile, BundleTarget } from '../databricks/bundleParser';
 
 // ─── Labels used to identify picks ────────────────────────────────────────────
-const LABEL_AZURE  = '$(azure) Azure CLI';
-const LABEL_GCP    = '$(cloud) GCP (gcloud)';
-const LABEL_CFG    = '$(file-text) ~/.databrickscfg';
-const LABEL_PAT    = '$(key) Personal Access Token';
-const LABEL_OAUTH  = '$(globe) OAuth / Browser Login';
+const LABEL_AZURE   = '$(azure) Azure CLI';
+const LABEL_GCP     = '$(cloud) GCP (gcloud)';
+const LABEL_CFG     = '$(file-text) ~/.databrickscfg';
+const LABEL_PAT     = '$(key) Personal Access Token';
+const LABEL_OAUTH   = '$(globe) OAuth / Browser Login';
+const LABEL_BUNDLE  = '$(package) Use Bundle Target';
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
@@ -40,6 +42,10 @@ export async function configureConnection(): Promise<void> {
         checkGcpAdcLogin().catch(() => null),
         Promise.resolve(listProfiles(configPath)),
     ]);
+
+    // Detect DAB bundle targets
+    const bundleFile = findBundleFile(vscode.workspace.workspaceFolders ?? []);
+    const bundleTargets: BundleTarget[] = bundleFile ? (parseBundleFile(bundleFile)?.targets ?? []) : [];
 
     // Build QuickPick showing only what's available
     const items: vscode.QuickPickItem[] = [];
@@ -65,6 +71,14 @@ export async function configureConnection(): Promise<void> {
             label: LABEL_CFG,
             description: `${profiles.length} profile${profiles.length > 1 ? 's' : ''} found`,
             detail: profiles.map(p => p.name).join(', '),
+        });
+    }
+
+    for (const target of bundleTargets) {
+        items.push({
+            label: LABEL_BUNDLE,
+            description: `Target: ${target.name}`,
+            detail: target.host,
         });
     }
 
@@ -98,6 +112,9 @@ export async function configureConnection(): Promise<void> {
         await databricksCfgFlow(config, target, profiles);
     } else if (picked.label === LABEL_OAUTH) {
         await oauthFlow(config, target);
+    } else if (picked.label === LABEL_BUNDLE) {
+        const bundleHost = picked.detail ?? '';
+        await bundleTargetFlow(config, target, bundleHost, picked.description ?? '');
     } else {
         await manualPatFlow(config, target);
     }
@@ -260,6 +277,50 @@ async function oauthFlow(
 
     sendEvent('connection/configured', { authType: 'oauth-u2m' });
     vscode.window.showInformationMessage(`CatalystOps: Connected to "${host}" via OAuth`);
+}
+
+// ─── Bundle Target flow ───────────────────────────────────────────────────────
+
+async function bundleTargetFlow(
+    config: vscode.WorkspaceConfiguration,
+    target: vscode.ConfigurationTarget,
+    host: string,
+    targetDescription: string,
+): Promise<void> {
+    // Bundle target sets the host; user still picks an auth method
+    const authPick = await vscode.window.showQuickPick(
+        [
+            { label: LABEL_OAUTH, description: 'Recommended — log in via browser' },
+            { label: LABEL_PAT, description: 'Enter a personal access token' },
+        ],
+        { title: `CatalystOps: Auth for bundle target ${targetDescription} (${host})`, placeHolder: 'Choose auth method' },
+    );
+    if (!authPick) { return; }
+
+    if (authPick.label === LABEL_OAUTH) {
+        try {
+            await vscode.window.withProgress(
+                { location: vscode.ProgressLocation.Notification, title: 'CatalystOps: Opening browser for Databricks login…', cancellable: false },
+                async () => { await startOAuthFlow(host); },
+            );
+        } catch (err) {
+            vscode.window.showErrorMessage(`CatalystOps: OAuth login failed — ${err instanceof Error ? err.message : String(err)}`);
+            return;
+        }
+        await saveSettings(config, target, { host, token: '', authType: 'oauth-u2m', profile: '' });
+        sendEvent('connection/configured', { authType: 'oauth-u2m', source: 'bundle' });
+        vscode.window.showInformationMessage(`CatalystOps: Connected to "${host}" via OAuth (bundle target)`);
+    } else {
+        const token = await vscode.window.showInputBox({
+            prompt: 'Databricks personal access token',
+            placeHolder: 'dapi...',
+            password: true,
+        });
+        if (token === undefined) { return; }
+        await saveSettings(config, target, { host, token, authType: 'pat', profile: '' });
+        sendEvent('connection/configured', { authType: 'pat', source: 'bundle' });
+        vscode.window.showInformationMessage(`CatalystOps: Connected to "${host}" (bundle target)`);
+    }
 }
 
 // ─── Manual PAT flow ──────────────────────────────────────────────────────────
