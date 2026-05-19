@@ -61,6 +61,7 @@ df.collect()  # noqa: catalystops
 | Rule ID | Severity | Description |
 |---------|----------|-------------|
 | `CODE_WITHCOLUMN_LOOP_001` | Warning | `withColumn()` inside a loop creates a new plan node per iteration |
+| `CODE_WITHCOL_CHAIN_001` | Warning | 3+ chained `.withColumn()` calls produce a deeply nested plan; use `.withColumns()` or `.select()` |
 | `CODE_REPEATED_ACTIONS_001` | Warning | Multiple actions on the same DataFrame without `.cache()` |
 | `CODE_REPRO_001` | Info | Repeated source scan without `.cache()` or `.persist()` |
 

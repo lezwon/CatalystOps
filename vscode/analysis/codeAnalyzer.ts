@@ -1,6 +1,6 @@
 /**
  * Local code analyzer - Port of python/spark_optimizer/analyzers/code_analyzer.py
- * Detects 23 PySpark anti-patterns via regex without needing a cluster connection.
+ * Detects 30+ PySpark anti-patterns via regex without needing a cluster connection.
  */
 
 import { CodeIssue, Severity, IssueCategory, Fix } from '../models/types';
@@ -795,6 +795,168 @@ df = reduce(
                     location: `Line ${i + 1}`,
                 });
                 break; // one issue per loop, first withColumn found
+            }
+        }
+    }
+
+    // Chained withColumn detection: flag 3+ .withColumn() calls in the same
+    // expression. Covers three patterns:
+    //   (a) multi-line parenthesized chains:  df = (\n  src\n  .withColumn(...)\n  ...)
+    //   (b) single-line method chains:  df.withColumn(...).withColumn(...).withColumn(...)
+    //   (c) sequential reassignment:  df = df.withColumn(...)\n df = df.withColumn(...)
+    // Each .withColumn() creates a new DataFrame projection node; many chained
+    // calls produce a deeply nested plan that is slow to analyze and execute.
+    // .withColumns() (Spark 3.3+) or .select() batch all projections in one node.
+    {
+        const CHAIN_THRESHOLD = 3;
+        const flaggedLines = new Set<number>();
+
+        const chainFixCode = `# Instead of:
+df = (source
+    .withColumn("a", F.col("x") + 1)
+    .withColumn("b", F.upper(F.col("y")))
+    .withColumn("c", F.lit(0))
+)
+
+# Use withColumns (Spark 3.3+):
+df = (source
+    .withColumns({
+        "a": F.col("x") + 1,
+        "b": F.upper(F.col("y")),
+        "c": F.lit(0),
+    })
+)
+
+# Or use select:
+df = (source
+    .select(
+        "*",
+        (F.col("x") + 1).alias("a"),
+        F.upper(F.col("y")).alias("b"),
+        F.lit(0).alias("c"),
+    )
+)`;
+
+        function pushChainIssue(wcCount: number, line: number, col: number) {
+            issues.push({
+                id: 'CODE_WITHCOL_CHAIN_001',
+                severity: Severity.WARNING,
+                category: IssueCategory.CODE,
+                title: 'Chained withColumn() Calls',
+                description: `${wcCount} chained .withColumn() calls detected. Each call creates a new DataFrame projection node, producing a deeply nested query plan that is slow to analyze and execute. Use .withColumns() (Spark 3.3+) or .select() to batch all column expressions into a single plan node.`,
+                fix: {
+                    description: 'Replace chained .withColumn() with .withColumns() or .select()',
+                    code: chainFixCode,
+                },
+                line,
+                column: col,
+                endLine: line,
+                endColumn: lines[line].length,
+                location: `Line ${line + 1}`,
+            });
+        }
+
+        // (a) Multi-line parenthesized expressions: track paren depth.
+        //     When depth > 0 accumulate .withColumn( occurrences.
+        //     When depth returns to 0 check the count.
+        {
+            let depth = 0;
+            let wcInExpr: number[] = [];
+
+            function flushExpr() {
+                if (wcInExpr.length >= CHAIN_THRESHOLD) {
+                    const firstLine = wcInExpr[0];
+                    if (!/# noqa: catalystops\b/i.test(lines[firstLine])) {
+                        const col = lines[firstLine].indexOf('.withColumn(');
+                        pushChainIssue(wcInExpr.length, firstLine, col >= 0 ? col : 0);
+                        for (const ln of wcInExpr) { flaggedLines.add(ln); }
+                    }
+                }
+                wcInExpr = [];
+            }
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                // Find .withColumn( occurrences outside comments on this line
+                let sf = 0;
+                while (true) {
+                    const idx = line.indexOf('.withColumn(', sf);
+                    if (idx === -1) { break; }
+                    if (!isInsideComment(line, idx)) { wcInExpr.push(i); }
+                    sf = idx + 1;
+                }
+                // Track paren depth (skip strings and comments)
+                let inStr: string | null = null;
+                for (let j = 0; j < line.length; j++) {
+                    const ch = line[j];
+                    if (inStr) {
+                        if (ch === '\\') { j++; continue; }
+                        if (ch === inStr) { inStr = null; }
+                    } else {
+                        if (ch === '#') { break; }
+                        if (ch === '"' || ch === "'") { inStr = ch; continue; }
+                        if (ch === '(') { depth++; }
+                        else if (ch === ')') {
+                            if (depth > 0) { depth--; }
+                            if (depth === 0) { flushExpr(); }
+                        }
+                    }
+                }
+            }
+            if (depth > 0) { flushExpr(); }
+        }
+
+        // (b) Single-line chains: 3+ .withColumn( on one line not already flagged
+        for (let i = 0; i < lines.length; i++) {
+            if (flaggedLines.has(i)) { continue; }
+            const lineText = lines[i];
+            let wcCount = 0;
+            let sf = 0;
+            while (true) {
+                const idx = lineText.indexOf('.withColumn(', sf);
+                if (idx === -1) { break; }
+                if (!isInsideComment(lineText, idx)) { wcCount++; }
+                sf = idx + 1;
+            }
+            if (wcCount >= CHAIN_THRESHOLD) {
+                if (/# noqa: catalystops\b/i.test(lineText)) { continue; }
+                const col = lineText.indexOf('.withColumn(');
+                pushChainIssue(wcCount, i, col);
+                flaggedLines.add(i);
+            }
+        }
+
+        // (c) Sequential reassignment: var = var.withColumn(...) on consecutive lines
+        let seqStart = -1;
+        let seqVar = '';
+        let seqCount = 0;
+        const wcAssignRe = /^[ \t]*(\w+)\s*=\s*\1\.withColumn\s*\(/;
+
+        function emitSeqIssue() {
+            const lineText = lines[seqStart];
+            if (/# noqa: catalystops\b/i.test(lineText)) { return; }
+            const col = lineText.indexOf(seqVar);
+            pushChainIssue(seqCount, seqStart, col >= 0 ? col : 0);
+        }
+
+        for (let i = 0; i <= lines.length; i++) {
+            const lineText = i < lines.length ? lines[i] : '';
+            if (i < lines.length && lineText.trim() === '' && seqCount > 0) { continue; }
+            const m = i < lines.length ? wcAssignRe.exec(lineText) : null;
+            if (m && !isInsideComment(lineText, lineText.indexOf('.withColumn(')) && !flaggedLines.has(i)) {
+                if (seqCount === 0 || m[1] !== seqVar) {
+                    if (seqCount >= CHAIN_THRESHOLD) { emitSeqIssue(); }
+                    seqStart = i;
+                    seqVar = m[1];
+                    seqCount = 1;
+                } else {
+                    seqCount++;
+                }
+            } else {
+                if (seqCount >= CHAIN_THRESHOLD) { emitSeqIssue(); }
+                seqStart = -1;
+                seqVar = '';
+                seqCount = 0;
             }
         }
     }

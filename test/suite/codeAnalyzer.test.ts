@@ -163,6 +163,98 @@ spark.sql(f"SELECT * FROM {table}")
         assert.ok(!issues.some(i => i.id === 'CODE_WITHCOL_LOOP_001'), 'loop without withColumn should not be flagged');
     });
 
+    // ── Chained withColumn ─────────────────────────────────────────────────
+
+    test('should flag 3+ .withColumn() in a multi-line parenthesized expression', () => {
+        const code = [
+            'users_transformed = (',
+            '    users_df',
+            '    .filter(col("is_active") == True)',
+            '    .withColumn("age_group",',
+            '        F.when(col("age") < 25, "18-24")',
+            '         .otherwise("55+"))',
+            '    .withColumn("days_since_signup",',
+            '        F.datediff(F.current_date(), col("signup_date")))',
+            '    .withColumn("score_tier",',
+            '        F.when(col("user_score") >= 80, "Premium")',
+            '         .otherwise("Basic"))',
+            ')',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_WITHCOL_CHAIN_001'), 'multi-line paren chain should be flagged');
+    });
+
+    test('should NOT flag 2 .withColumn() in a multi-line parenthesized expression', () => {
+        const code = [
+            'df = (',
+            '    src',
+            '    .withColumn("a", F.lit(1))',
+            '    .withColumn("b", F.lit(2))',
+            ')',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_WITHCOL_CHAIN_001'), '2 withColumn in parens should not be flagged');
+    });
+
+    test('should flag 3+ chained .withColumn() on a single line', () => {
+        const code = 'df = df.withColumn("a", F.lit(1)).withColumn("b", F.lit(2)).withColumn("c", F.lit(3))';
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_WITHCOL_CHAIN_001'), 'chained withColumn should be flagged');
+    });
+
+    test('should flag 3+ sequential withColumn reassignments', () => {
+        const code = [
+            'df = df.withColumn("a", F.lit(1))',
+            'df = df.withColumn("b", F.lit(2))',
+            'df = df.withColumn("c", F.lit(3))',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_WITHCOL_CHAIN_001'), 'sequential withColumn should be flagged');
+    });
+
+    test('should NOT flag only 2 chained .withColumn() calls', () => {
+        const code = 'df = df.withColumn("a", F.lit(1)).withColumn("b", F.lit(2))';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_WITHCOL_CHAIN_001'), '2 chained withColumn should not be flagged');
+    });
+
+    test('should NOT flag 2 sequential withColumn reassignments', () => {
+        const code = [
+            'df = df.withColumn("a", F.lit(1))',
+            'df = df.withColumn("b", F.lit(2))',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_WITHCOL_CHAIN_001'), '2 sequential withColumn should not be flagged');
+    });
+
+    test('should NOT flag sequential withColumn on different variables', () => {
+        const code = [
+            'df1 = df1.withColumn("a", F.lit(1))',
+            'df2 = df2.withColumn("b", F.lit(2))',
+            'df3 = df3.withColumn("c", F.lit(3))',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_WITHCOL_CHAIN_001'), 'different variables should not be flagged');
+    });
+
+    test('should suppress chained withColumn with noqa', () => {
+        const code = 'df = df.withColumn("a", F.lit(1)).withColumn("b", F.lit(2)).withColumn("c", F.lit(3))  # noqa: catalystops';
+        const issues = analyzeCode(code);
+        assert.ok(!issues.some(i => i.id === 'CODE_WITHCOL_CHAIN_001'), 'noqa should suppress');
+    });
+
+    test('should flag sequential withColumn with blank lines in between', () => {
+        const code = [
+            'df = df.withColumn("a", F.lit(1))',
+            '',
+            'df = df.withColumn("b", F.lit(2))',
+            '',
+            'df = df.withColumn("c", F.lit(3))',
+        ].join('\n');
+        const issues = analyzeCode(code);
+        assert.ok(issues.some(i => i.id === 'CODE_WITHCOL_CHAIN_001'), 'blank lines between should still flag');
+    });
+
     test('should not flag intersect() (no generic warning — only schema-aware check fires)', () => {
         const code = 'result = df1.intersect(df2)';
         const issues = analyzeCode(code);

@@ -26,6 +26,7 @@ This page lists every rule CatalystOps checks. For context and fix examples, see
 | `CODE_REPARTITION_001` | repartition before write | Use coalesce() |
 | `CODE_WINDOW_001` | Window without partitionBy | Global window |
 | `CODE_WITHCOLUMN_LOOP_001` | withColumn in loop | New plan node per iteration |
+| `CODE_WITHCOL_CHAIN_001` | Chained withColumn() calls | Deeply nested plan from 3+ chained .withColumn(); use .withColumns() or .select() |
 | `CODE_REPEATED_ACTIONS_001` | Repeated actions without cache | Recomputes the DataFrame |
 | `CODE_UDF_FILTER_001` | UDF in filter() | Blocks predicate pushdown |
 | `CODE_STREAMING_TRIGGER_001` | No .trigger() | Continuous micro-batches |
