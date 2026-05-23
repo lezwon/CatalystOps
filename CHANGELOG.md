@@ -2,6 +2,13 @@
 
 All notable changes to CatalystOps are documented here.
 
+## [0.12.1]
+
+### Added
+- **Chained `.withColumn()` detection** -- flags 3+ chained `.withColumn()` calls in multi-line expressions, single-line chains, and sequential reassignment patterns. Suggests `.withColumns()` (Spark 3.3+) or `.select()` to batch projections into a single plan node.
+
+---
+
 ## [0.12.0]
 
 ### Added

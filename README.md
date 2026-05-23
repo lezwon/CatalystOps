@@ -23,7 +23,7 @@ Runs instantly on every file open and save. Detects:
 | Severity | Examples |
 |----------|---------|
 | **Critical** | `collect()`, `crossJoin()`, SQL injection via f-strings, `for row in df.collect()`, DLT CDC ordering bugs |
-| **Warning** | `toPandas()`, `coalesce(1)`, global window functions, `withColumn` in loops, streaming without watermark, UDFs in `.filter()`, `.repartition(N)` before write, repeated actions without `.cache()` |
+| **Warning** | `toPandas()`, `coalesce(1)`, global window functions, `withColumn` in loops, chained `.withColumn()` calls, streaming without watermark, UDFs in `.filter()`, `.repartition(N)` before write, repeated actions without `.cache()` |
 | **Info** | Schema inference, `SELECT *`, missing write mode, ZORDER (use Liquid Clustering), unnamed streaming queries, MERGE without Deletion Vectors |
 
 Streaming, Delta, and DLT pipelines have dedicated rule sets. Add `# noqa: catalystops` to suppress a line.
